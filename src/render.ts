@@ -414,12 +414,35 @@ interface Chain {
   geomKey: string;
 }
 
+/** Fingerabdruck der Geometrie einer Straße (Punkte, Glättung, Abschnittsgrenzen) */
+function geomHash(road: Road): string {
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (const [x, y] of road.points) {
+    const a = Math.round(x * 1e8), b = Math.round(y * 1e8);
+    h1 = Math.imul(h1 ^ (a | 0), 16777619) ^ Math.imul(h2 ^ (b | 0), 2246822507);
+    h2 = Math.imul(h2 ^ (a / 4294967296) | 0, 3266489909) + (b | 0);
+  }
+  return `${road.points.length}:${h1 >>> 0}:${h2 >>> 0}:${road.smooth ? 1 : 0}:${(road.sections ?? []).map((x) => x.index).join(',')}`;
+}
+
+/** Knotenschlüssel je Straße, nur bei geänderter Geometrie neu berechnet */
+const keyCache = new WeakMap<Road, { hash: string; keys: string[] }>();
+function pointKeys(road: Road, hash: string): string[] {
+  const hit = keyCache.get(road);
+  if (hit && hit.hash === hash) return hit.keys;
+  const keys = road.points.map(nodeKey);
+  keyCache.set(road, { hash, keys });
+  return keys;
+}
+
 /** Punkte, an denen sich mindestens zwei verschiedene Straßen treffen. */
-function findNodes(roads: Road[]): Map<string, LngLat> {
+function findNodes(roads: Road[], hashes: Map<Road, string> = new Map()): Map<string, LngLat> {
   const seen = new Map<string, { p: LngLat; roads: Set<string> }>();
   for (const r of roads) {
-    for (const p of r.points) {
-      const k = nodeKey(p);
+    const keys = pointKeys(r, hashes.get(r) ?? geomHash(r));
+    for (let i = 0; i < r.points.length; i++) {
+      const p = r.points[i];
+      const k = keys[i];
       const e = seen.get(k) ?? { p, roads: new Set<string>() };
       e.roads.add(r.id);
       seen.set(k, e);
@@ -552,7 +575,7 @@ function chainGeometry(c: { parts: Part[]; start?: string; end?: string }): Chai
     center: dedupe(pts),
     length: cum[cum.length - 1],
     bounds: rawBounds.map((i) => cum[idx[i]]),
-    geomKey: JSON.stringify([raw, smooth]),
+    geomKey: '',
   };
 }
 
@@ -563,6 +586,8 @@ function chainGeometry(c: { parts: Part[]; start?: string; end?: string }): Chai
  */
 export class RoadRenderer {
   private chainCache = new Map<string, Chain>();
+  private segCache = new Map<string, { key: string; segs: Segment[] }>();
+  private junctionCache = new Map<string, { sig: string; res: ReturnType<typeof buildJunction> }>();
   private featCache = new Map<string, RoadFeatures>();
 
   build(
@@ -575,19 +600,31 @@ export class RoadRenderer {
     const optKey = `${style}${opts.traffic ? '+t' : ''}`;
     const junctionInfo = new Map<string, JunctionInfo>();
     const transitions = new Map<string, TransitionInfo>();
-    const nodes = withJunctions ? findNodes(roads) : new Map<string, LngLat>();
+    const hashes = new Map(roads.map((r) => [r, geomHash(r)] as const));
+    const nodes = withJunctions ? findNodes(roads, hashes) : new Map<string, LngLat>();
     const surfaces: Feature[] = [];
     const markings: Feature[] = [];
     const decor: Feature[] = [];
 
     // 1. Segmente und Züge
-    const segs = roads.flatMap((r) => segmentRoad(r, nodes));
+    const segCache = new Map<string, { key: string; segs: Segment[] }>();
+    const segs = roads.flatMap((r) => {
+      const keys = pointKeys(r, hashes.get(r)!);
+      const cut = keys.map((k, i) => (nodes.has(k) ? i : -1)).filter((i) => i >= 0).join(',');
+      const key = `${hashes.get(r)}|${cut}|${JSON.stringify([r.profile, r.sections?.map((x) => x.profile)])}`;
+      const hit = this.segCache.get(r.id);
+      const out = hit && hit.key === key ? hit.segs : segmentRoad(r, nodes);
+      for (const x of out) x.road = r;
+      segCache.set(r.id, { key, segs: out });
+      return out;
+    });
+    this.segCache = segCache;
     const chainCache = new Map<string, Chain>();
     const chains = buildChains(segs).map((c) => {
-      const probe = JSON.stringify(c.parts.map((p) => [p.seg.id, p.rev, p.seg.raw, p.seg.road.smooth, p.seg.start, p.seg.end]));
+      const probe = c.parts.map((p) => `${p.seg.id}${p.rev ? 'r' : ''}@${hashes.get(p.seg.road) ?? geomHash(p.seg.road)}|${p.seg.start}|${p.seg.end}`).join('+');
       const chain = this.chainCache.get(probe) ?? chainGeometry(c);
       // Geometrie aus dem Cache, Bezüge immer aktuell
-      Object.assign(chain, { parts: c.parts, profiles: c.parts.map(oriented), start: c.start, end: c.end });
+      Object.assign(chain, { parts: c.parts, profiles: c.parts.map(oriented), start: c.start, end: c.end, geomKey: probe });
       chainCache.set(probe, chain);
       return chain;
     });
@@ -612,6 +649,7 @@ export class RoadRenderer {
         both: !!(c.start && c.end),
         length: c.length,
         uniform: uniformLength(c, atStart),
+        sig: `${c.geomKey}|${atStart}|${JSON.stringify(atStart ? c.profiles[0] : c.profiles[c.profiles.length - 1])}`,
       };
     };
     /** Strecke ab dem Knoten, auf der der Querschnitt gleich bleibt (vor der ersten Verziehung) */
@@ -632,8 +670,14 @@ export class RoadRenderer {
     }
     /** je Zug: Rückschnitt Anfang/Ende, markierungsfreier Bereich Anfang/Ende */
     const trims = new Map<string, [number, number, number, number]>();
+    const junctionCache = new Map<string, { sig: string; res: ReturnType<typeof buildJunction> }>();
     for (const [k, list] of arms) {
-      const j = buildJunction(k, nodes.get(k)!, list, { ...defaultJunction(), ...junctions[k] }, style);
+      // Kreuzungen nur neu berechnen, wenn sich Arme oder Einstellungen geändert haben
+      const st = { ...defaultJunction(), ...junctions[k] };
+      const sig = JSON.stringify([st, style]) + list.map((a) => a.sig).sort().join('#');
+      const hit = this.junctionCache.get(k);
+      const j = hit && hit.sig === sig ? hit.res : buildJunction(k, nodes.get(k)!, list, st, style);
+      junctionCache.set(k, { sig, res: j });
       junctionInfo.set(k, j.info);
       surfaces.push(...j.surfaces);
       markings.push(...j.markings);
@@ -645,6 +689,8 @@ export class RoadRenderer {
         trims.set(t.segId, cur);
       }
     }
+
+    this.junctionCache = junctionCache;
 
     // 3. Straßenstücke: je Teil des Zugs, damit die Auswahl bei der richtigen Straße landet;
     //    zwischen Teilen mit verschiedenem Querschnitt eine Verziehung

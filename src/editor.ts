@@ -1,6 +1,6 @@
 import type { Map as MapLibre, MapLayerMouseEvent, MapMouseEvent, PointLike } from 'maplibre-gl';
 import type { Feature } from 'geojson';
-import { EMPTY, setData } from './map';
+import { EMPTY, SURFACE_LAYERS, setData, setStripHighlight } from './map';
 import type { JunctionInfo } from './junction';
 import type { TransitionInfo } from './render';
 import { defaultJunction, ensureSection, insertPoint, presetProfile, removePoint, uid, type LngLat, type Road, type Strip } from './model';
@@ -40,6 +40,9 @@ export class Editor {
   onChange = () => {};
   /** Klick auf etwas in der Karte (Eigenschaften des getroffenen Elements, oder null) */
   onPick: (props: Record<string, unknown> | null, at: [number, number]) => void = () => {};
+  /** Ziehen beginnt (betroffene Straßen) bzw. endet — für schnelles Neuzeichnen */
+  onDragStart = (_roadIds: Set<string>) => {};
+  onDragEnd = () => {};
   /** Moduswechsel (z. B. um das Kartenfenster zu schließen) */
   onModeChange = (_mode: Mode) => {};
   /** Entwurfsstraße beim Zeichnen geändert */
@@ -195,7 +198,7 @@ export class Editor {
   }
 
   refreshOverlays() {
-    this.map.setFilter('strip-select', ['==', ['get', 'stripId'], this.selectedStrip ?? '__none__']);
+    setStripHighlight(this.map, this.selectedStrip);
     const road = this.store.road(this.selectedId);
     const node = this.selectedNode ? this.nodePoint(this.selectedNode) : null;
     if (road) {
@@ -369,6 +372,7 @@ export class Editor {
       });
     }
     this.drag = { key, members };
+    this.onDragStart(new Set(members.map((m) => m.road.id)));
   }
 
   private startMidpointDrag(e: MapLayerMouseEvent) {
@@ -433,6 +437,7 @@ export class Editor {
     if (!this.drag) return;
     const road = this.drag.members[0]?.road;
     this.drag = null;
+    this.onDragEnd();
     this.suppressClickUntil = performance.now() + 100;
     if (road && connectRoad(this.store.project.roads, road)) this.store.changed('structure');
     else this.onChange();
@@ -453,7 +458,7 @@ export class Editor {
       [e.point.x - 3, e.point.y - 3],
       [e.point.x + 3, e.point.y + 3],
     ];
-    const hit = this.map.queryRenderedFeatures(box, { layers: ['surfaces'] })[0];
+    const hit = this.map.queryRenderedFeatures(box, { layers: SURFACE_LAYERS })[0];
     if (hit?.properties?.node) this.selectNode(hit.properties.node as string);
     else this.select((hit?.properties?.roadId as string) ?? null, (hit?.properties?.section as number) ?? 0, (hit?.properties?.stripId as string) ?? null);
     this.onPick(hit?.properties ?? null, e.lngLat.toArray() as [number, number]);

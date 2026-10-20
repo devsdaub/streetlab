@@ -1,3 +1,4 @@
+import { idbGet, idbSet } from './idb';
 import { emptyProject, type Project, type Road } from './model';
 
 const STORAGE_KEY = 'streetlab.project.v1';
@@ -13,14 +14,37 @@ export class Store {
   private listeners = new Set<Listener>();
   private saveTimer = 0;
 
-  constructor() {
-    this.project = emptyProject();
+  /** zuletzt gemessene Größe des gespeicherten Projekts (Bytes) */
+  savedBytes = 0;
+
+  private constructor(project: Project) {
+    this.project = project;
+  }
+
+  /**
+   * Projekt laden: IndexedDB (unbegrenzt). Ein Stand im alten localStorage-Schlüssel hat Vorrang
+   * und wird einmalig übernommen — so funktionieren auch ältere Projekte und Testszenen.
+   */
+  static async load(): Promise<Store> {
+    let project: Project | undefined;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) this.project = JSON.parse(raw);
+      if (raw) {
+        project = JSON.parse(raw);
+        await idbSet(STORAGE_KEY, project);
+        localStorage.removeItem(STORAGE_KEY);
+      }
     } catch {
-      /* leeres Projekt */
+      /* kein localStorage */
     }
+    if (!project) {
+      try {
+        project = await idbGet<Project>(STORAGE_KEY);
+      } catch (e) {
+        console.error('Laden aus IndexedDB fehlgeschlagen', e);
+      }
+    }
+    return new Store(project ?? emptyProject());
   }
 
   on(fn: Listener) {
@@ -67,9 +91,12 @@ export class Store {
 
   scheduleSave() {
     clearTimeout(this.saveTimer);
-    this.saveTimer = window.setTimeout(() => {
+    this.saveTimer = window.setTimeout(async () => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(this.project));
+        // strukturierte Kopie, damit spätere Änderungen das Gespeicherte nicht berühren
+        const snapshot = JSON.parse(JSON.stringify(this.project));
+        await idbSet(STORAGE_KEY, snapshot);
+        this.savedBytes = JSON.stringify(snapshot).length;
       } catch (e) {
         console.error('Speichern fehlgeschlagen', e);
       }

@@ -55,6 +55,8 @@ export interface ArmInput {
   length?: number;
   /** Länge ab Knoten mit gleichbleibendem Querschnitt (Pfeile nur dort) */
   uniform?: number;
+  /** Fingerabdruck des Arms (Geometrie + Querschnitt) für den Zwischenspeicher */
+  sig?: string;
 }
 
 interface ArmStrip {

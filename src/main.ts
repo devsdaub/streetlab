@@ -1,14 +1,16 @@
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
 import { Editor } from './editor';
-import { EMPTY, createMap, setData, type Basemap } from './map';
+import { EMPTY, createMap, setChunked, setData, type Basemap } from './map';
 import { MapEditor } from './mapedit';
 import { Panel } from './panel';
 import { Toolbar } from './toolbar';
-import { RoadRenderer, type Built } from './render';
+import { RoadRenderer, nodeKey, type Built } from './render';
+import type { Road } from './model';
+import type { FeatureCollection } from 'geojson';
 import { Store } from './store';
 
-const store = new Store();
+const store = await Store.load();
 const map = createMap(document.getElementById('map')!, store.project.view, (store.project.basemap as Basemap) ?? 'sat');
 const roads = new RoadRenderer();
 const draft = new RoadRenderer();
@@ -37,22 +39,73 @@ map.on('load', () => {
 
   // höchstens einmal pro Frame neu berechnen — beim Ziehen kommen viele Events
   let pending = false;
+  /** Straßen, die gerade gezogen werden, samt Nachbarn (null = keine Bearbeitung) */
+  let active: { show: Set<string>; build: Road[]; nodes: Set<string> } | null = null;
+  const activeRenderer = new RoadRenderer();
+  const opts = () => ({ style: store.project.markingStyle ?? 'de', traffic: !!store.project.traffic, links: store.project.stripLinks });
+  const pick = (fc: FeatureCollection, keep: (p: any) => boolean): FeatureCollection => ({
+    type: 'FeatureCollection',
+    features: fc.features.filter((f) => keep(f.properties)),
+  });
+
+  /** Nachbarschaft: Straßen, die mit den gezogenen einen Punkt teilen (zwei Ringe weit) */
+  const neighbourhood = (ids: Set<string>) => {
+    const roadsAll = store.project.roads;
+    const keysOf = (r: Road) => new Set(r.points.map(nodeKey));
+    const ring = (set: Set<string>) => {
+      const keys = new Set<string>();
+      for (const r of roadsAll) if (set.has(r.id)) for (const k of keysOf(r)) keys.add(k);
+      const out = new Set(set);
+      for (const r of roadsAll) if (r.points.some((p) => keys.has(nodeKey(p)))) out.add(r.id);
+      return { roads: out, keys };
+    };
+    // neu berechnet wird die Umgebung (zwei Ringe, damit Kreuzungen alle Arme kennen),
+    // angezeigt werden nur die gezogenen Straßen und ihre Knoten
+    const first = ring(ids);
+    const second = ring(first.roads);
+    return { show: ids, build: roadsAll.filter((r) => second.roads.has(r.id)), nodes: first.keys };
+  };
+
   const renderRoads = () => {
     if (pending) return;
     pending = true;
     requestAnimationFrame(() => {
       pending = false;
-      built = roads.build(store.project.roads, store.project.junctions, true, {
-        style: store.project.markingStyle ?? 'de',
-        traffic: !!store.project.traffic,
-        links: store.project.stripLinks,
-      });
-      setData(map, 'surfaces', built.surfaces);
-      setData(map, 'markings', built.markings);
-      setData(map, 'decor', built.decor);
+      const t0 = performance.now();
+      if (active) {
+        // nur die Umgebung der gezogenen Straße neu berechnen und zeigen
+        const part = activeRenderer.build(active.build, store.project.junctions, true, opts());
+        // Knotenschlüssel hängen an der aktuellen Position — daher je Bild neu bestimmen
+        const nodesNow = new Set(store.project.roads.filter((r) => active!.show.has(r.id)).flatMap((r) => r.points.map(nodeKey)));
+        const showRoad = (p: any) => (p.roadId && active!.show.has(p.roadId)) || (p.node && nodesNow.has(p.node));
+        setData(map, 'surfaces-active', pick(part.surfaces, showRoad));
+        setData(map, 'markings-active', pick(part.markings, showRoad));
+        setData(map, 'decor-active', pick(part.decor, showRoad));
+      } else {
+        built = roads.build(store.project.roads, store.project.junctions, true, opts());
+        setChunked(map, 'surfaces', built.surfaces);
+        setChunked(map, 'markings', built.markings);
+        setChunked(map, 'decor', built.decor);
+        for (const s of ['surfaces-active', 'markings-active', 'decor-active']) setData(map, s, EMPTY);
+      }
+      if (import.meta.env.DEV) (window as any).__streetlab.lastBuildMs = performance.now() - t0;
       editor.refreshOverlays();
       mapEditor.refresh();
     });
+  };
+
+  editor.onDragStart = (ids) => {
+    active = neighbourhood(ids);
+    // statische Ebene ohne die bearbeitete Umgebung, damit nichts doppelt erscheint
+    const hide = (p: any) => !((p.roadId && active!.show.has(p.roadId)) || (p.node && active!.nodes.has(p.node)));
+    const shown = (p: any) => !hide(p);
+    setChunked(map, 'surfaces', built.surfaces, shown);
+    setChunked(map, 'markings', built.markings, shown);
+    setChunked(map, 'decor', built.decor, shown);
+  };
+  editor.onDragEnd = () => {
+    active = null;
+    renderRoads();
   };
 
   editor.onDraft = () => {

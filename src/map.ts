@@ -1,4 +1,4 @@
-import maplibregl, { type GeoJSONSource, type LayerSpecification, type StyleSpecification } from 'maplibre-gl';
+import maplibregl, { type GeoJSONSource, type LayerSpecification, type LineLayerSpecification, type StyleSpecification } from 'maplibre-gl';
 import type { FeatureCollection } from 'geojson';
 import type { Project } from './model';
 
@@ -45,8 +45,87 @@ export const BASEMAPS = {
 export type Basemap = keyof typeof BASEMAPS | 'none';
 const BASEMAP_IDS = Object.keys(BASEMAPS) as (keyof typeof BASEMAPS)[];
 
-const DESIGN_LAYERS = ['surfaces', 'markings', 'decor'] as const;
+/**
+ * Der Entwurf liegt auf mehrere Pakete verteilt (je Straße bzw. Knoten fest zugeordnet).
+ * Nach einer Änderung werden nur Pakete neu übergeben, deren Inhalt sich geändert hat —
+ * so bleibt auch ein ganzer Stadtteil flüssig bearbeitbar.
+ */
+export const CHUNKS = 12;
+const CHUNK_IDS = [...Array.from({ length: CHUNKS }, (_, i) => String(i)), 'active'];
+/** alle Flächen-Ebenen (für Klicks und Hervorhebung) */
+export const SURFACE_LAYERS = CHUNK_IDS.map((c) => `surfaces-${c}`);
+const DESIGN_LAYERS = CHUNK_IDS.flatMap((c) => [`surfaces-${c}`, `markings-${c}`, `decor-${c}`]);
+const SHADOW_LAYERS = CHUNK_IDS.map((c) => `shadow-${c}`);
 const SHADOW_OPACITY = 1;
+
+const shadowPaint: LineLayerSpecification['paint'] = {
+  'line-color': 'rgba(0,0,0,0.55)',
+  'line-width': ['interpolate', ['exponential', 2], ['zoom'], 14, 1, 18, 8, 22, 60],
+  'line-blur': ['interpolate', ['exponential', 2], ['zoom'], 14, 1, 18, 8, 22, 60],
+  'line-translate': [2, 3],
+};
+
+/** Ebenen eines Pakets: Schatten, Flächen, Markierungen, Dekor */
+function designLayers(): LayerSpecification[] {
+  const fill = (id: string, sorted: boolean): LayerSpecification => ({
+    id,
+    type: 'fill',
+    source: id,
+    ...(sorted ? { layout: { 'fill-sort-key': ['get', 'rank'] } } : {}),
+    paint: { 'fill-color': ['get', 'color'] },
+  });
+  return [
+    // weicher Schlagschatten unter dem Entwurf (nur die Außenkanten bleiben sichtbar)
+    ...CHUNK_IDS.map((c) => ({ id: `shadow-${c}`, type: 'line', source: `surfaces-${c}`, paint: shadowPaint }) as LayerSpecification),
+    ...CHUNK_IDS.map((c) => fill(`surfaces-${c}`, true)),
+    ...CHUNK_IDS.map((c) => fill(`markings-${c}`, false)),
+    ...CHUNK_IDS.map((c) => fill(`decor-${c}`, true)),
+    // gewählter Streifen: Umriss in Akzentfarbe
+    ...CHUNK_IDS.map(
+      (c) =>
+        ({
+          id: `strip-select-${c}`,
+          type: 'line',
+          source: `surfaces-${c}`,
+          filter: ['==', ['get', 'stripId'], '__none__'],
+          paint: { 'line-color': '#5b8def', 'line-width': 2.5 },
+        }) as LayerSpecification,
+    ),
+  ];
+}
+
+const hashStr = (k: string) => {
+  let h = 2166136261;
+  for (let i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619);
+  return h >>> 0;
+};
+/** feste Paket-Zuordnung je Straße bzw. Knoten */
+export const chunkOf = (p: any) => hashStr(String(p?.roadId || p?.node || '')) % CHUNKS;
+
+const lastLists = new Map<string, unknown[]>();
+/**
+ * Entwurf auf die Pakete verteilen; nur geänderte Pakete werden an die Karte übergeben.
+ * Unveränderte Teile kommen aus dem Renderer-Zwischenspeicher als dieselben Objekte zurück.
+ */
+export function setChunked(map: maplibregl.Map, kind: 'surfaces' | 'markings' | 'decor', fc: FeatureCollection, exclude?: (p: any) => boolean) {
+  const parts: FeatureCollection['features'][] = Array.from({ length: CHUNKS }, () => []);
+  for (const f of fc.features) {
+    if (exclude?.(f.properties)) continue;
+    parts[chunkOf(f.properties)].push(f);
+  }
+  parts.forEach((list, i) => {
+    const id = `${kind}-${i}`;
+    const prev = lastLists.get(id);
+    if (prev && prev.length === list.length && prev.every((x, j) => x === list[j])) return;
+    lastLists.set(id, list);
+    setData(map, id, { type: 'FeatureCollection', features: list });
+  });
+}
+
+/** Hervorhebung des gewählten Streifens in allen Paketen */
+export function setStripHighlight(map: maplibregl.Map, stripId: string | null) {
+  for (const c of CHUNK_IDS) map.setFilter(`strip-select-${c}`, ['==', ['get', 'stripId'], stripId ?? '__none__']);
+}
 
 export function createMap(container: HTMLElement, view: Project['view'], basemap: Basemap) {
   const geo = () => ({ type: 'geojson' as const, data: EMPTY });
@@ -67,10 +146,8 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
     version: 8,
     sources: {
       ...rasterSources,
-      surfaces: geo(),
-      markings: geo(),
-      decor: geo(),
-      'draft-surfaces': geo(),
+...Object.fromEntries(CHUNK_IDS.flatMap((c) => [`surfaces-${c}`, `markings-${c}`, `decor-${c}`].map((id) => [id, geo()]))),
+            'draft-surfaces': geo(),
       'draft-markings': geo(),
       'edit-line': geo(),
       'edit-vertices': geo(),
@@ -82,33 +159,7 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
     layers: [
       { id: 'background', type: 'background', paint: { 'background-color': '#26282b' } },
       ...rasterLayers,
-      {
-        // weicher Schlagschatten unter dem Entwurf (nur die Außenkanten bleiben sichtbar)
-        id: 'shadow',
-        type: 'line',
-        source: 'surfaces',
-        paint: {
-          'line-color': 'rgba(0,0,0,0.55)',
-          'line-width': ['interpolate', ['exponential', 2], ['zoom'], 14, 1, 18, 8, 22, 60],
-          'line-blur': ['interpolate', ['exponential', 2], ['zoom'], 14, 1, 18, 8, 22, 60],
-          'line-translate': [2, 3],
-        },
-      },
-      {
-        id: 'surfaces',
-        type: 'fill',
-        source: 'surfaces',
-        layout: { 'fill-sort-key': ['get', 'rank'] },
-        paint: { 'fill-color': ['get', 'color'] },
-      },
-      { id: 'markings', type: 'fill', source: 'markings', paint: { 'fill-color': ['get', 'color'] } },
-      {
-        id: 'decor',
-        type: 'fill',
-        source: 'decor',
-        layout: { 'fill-sort-key': ['get', 'rank'] },
-        paint: { 'fill-color': ['get', 'color'] },
-      },
+      ...designLayers(),
       {
         id: 'draft-surfaces',
         type: 'fill',
@@ -117,14 +168,6 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
         paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.75 },
       },
       { id: 'draft-markings', type: 'fill', source: 'draft-markings', paint: { 'fill-color': ['get', 'color'] } },
-      {
-        // gewählter Streifen: Umriss in Akzentfarbe
-        id: 'strip-select',
-        type: 'line',
-        source: 'surfaces',
-        filter: ['==', ['get', 'stripId'], '__none__'],
-        paint: { 'line-color': '#5b8def', 'line-width': 2.5 },
-      },
       {
         id: 'edit-line',
         type: 'line',
@@ -223,7 +266,7 @@ export function setBasemap(map: maplibregl.Map, which: Basemap) {
 
 export function setDesignOpacity(map: maplibregl.Map, opacity: number) {
   for (const id of DESIGN_LAYERS) map.setPaintProperty(id, 'fill-opacity', opacity);
-  map.setPaintProperty('shadow', 'line-opacity', opacity * SHADOW_OPACITY);
+  for (const id of SHADOW_LAYERS) map.setPaintProperty(id, 'line-opacity', opacity * SHADOW_OPACITY);
 }
 
 /** Größte Bildfläche (Pixel) — darüber wird es für den Browser-Speicher eng. */
