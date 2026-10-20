@@ -14,7 +14,7 @@ import {
   slicePolyline,
   type Vec,
 } from './geometry';
-import { mainSign, roundaboutArrow, sharkTeeth, stopSign, trafficLight, turnArrow, yieldSign, type Shape } from './glyphs';
+import { mainSign, roundaboutArrow, sharkTeeth, stopSign, trafficLight, turnArrow, yieldSign, zebraSign, type Shape } from './glyphs';
 import {
   STRIP_TYPES,
   controlOf,
@@ -115,7 +115,7 @@ export interface JunctionResult {
   markings: Feature<Polygon>[];
   decor: Feature<Polygon>[];
   /** Rückschnitt und markierungsfreie Länge je Zug-Ende */
-  trims: { segId: string; atStart: boolean; trim: number; keepOut: number }[];
+  trims: { segId: string; atStart: boolean; trim: number; keepOut: number; median: number }[];
 }
 
 function makeArm(input: ArmInput, toLocal: (p: LngLat) => Vec): Arm | null {
@@ -385,16 +385,26 @@ export function buildJunction(
       const steps = 8;
       for (let i = 0; i <= steps; i++) {
         const s = s0 + ((s1 - s0) * i) / steps;
-        wedge.push(atS(a, s, o + 1.4 - (1.1 * i) / steps));
+        wedge.push(atS(a, s, o + 0.95 - (0.7 * i) / steps));
       }
       for (let i = steps; i >= 0; i--) {
         const s = s0 + ((s1 - s0) * i) / steps;
-        wedge.push(atS(a, s, o - 1.4 + (1.1 * i) / steps));
+        wedge.push(atS(a, s, o - 0.95 + (0.7 * i) / steps));
       }
       push(res.surfaces, wedge, STRIP_TYPES.sidewalk.color, 8);
       for (const poly of linePolygons([...wedge, wedge[0]], 0.12)) push(res.markings, poly, ringLine);
     }
   }
+
+  /** Form in Zufahrtsrichtung an Position s / Querversatz off setzen (x zeigt zum Knoten) */
+  const place = (x: Arm, s: number, off: number, shape: Shape[], to: Feature<Polygon>[]) => {
+    const { p, t } = pointAt(x.local, s);
+    const n = leftNormal(t);
+    const c = add(p, mul(n, off));
+    for (const sh of shape) {
+      push(to, sh.pts.map(([u, v]) => add(add(c, mul(t, -u)), mul(n, -v))), sh.color, sh.rank ?? 0);
+    }
+  };
 
   // 4. Querungen je Arm
   const lineAtOf = new Map<Arm, number>();
@@ -452,7 +462,15 @@ export function buildJunction(
     // Abbiegepfeile brauchen Platz vor der Haltlinie: Leitlinien dort aussparen
     if (!roundabout && arms.length >= 3) keepOut = Math.max(keepOut, lineAt - a.trim + 9);
     keepOutOf.set(a, keepOut);
-    res.trims.push({ segId: a.segId, atStart: a.atStart, trim: a.trim, keepOut });
+    // Mittelinsel zwischen den Fahrtrichtungen läuft bei einer Querung als Fußgänger-Insel bis an den Knoten
+    const hasMedian = a.strips.some((x, i) => x.type === 'median' && i > 0 && i < a.strips.length - 1);
+    const median = crossing !== 'none' && hasMedian && !roundabout ? 0.5 : keepOut;
+    res.trims.push({ segId: a.segId, atStart: a.atStart, trim: a.trim, keepOut, median });
+    // Zeichen 350 vor Zebrastreifen, rechts in Zufahrtsrichtung
+    if (crossing === 'zebra' && driven.length) {
+      const sSign = a.trim + (roundabout ? 4 : 1) + CROSSING_LEN + 5.5;
+      if (sSign < a.len - 2) place(a, sSign, a.cL + 1.1, zebraSign(), res.decor);
+    }
   }
 
   // 5. Spurverbindungen (automatisch aus Pfeilen und Geometrie, oder im Editor festgelegt)
@@ -562,15 +580,40 @@ export function buildJunction(
     }
   }
 
-  /** Form in Zufahrtsrichtung an Position s / Querversatz off setzen (x zeigt zum Knoten) */
-  const place = (x: Arm, s: number, off: number, shape: Shape[], to: Feature<Polygon>[]) => {
-    const { p, t } = pointAt(x.local, s);
-    const n = leftNormal(t);
-    const c = add(p, mul(n, off));
-    for (const sh of shape) {
-      push(to, sh.pts.map(([u, v]) => add(add(c, mul(t, -u)), mul(n, -v))), sh.color, sh.rank ?? 0);
+
+  // Gleise durch den Knoten: jede ankommende Schiene zum am besten passenden Gegenarm
+  if (!roundabout) {
+    const trams = (x: Arm, dir: 1 | -1) => x.strips.filter((s) => s.type === 'tram' && s.dir === dir);
+    for (const x of arms) {
+      for (const tin of trams(x, -1)) {
+        let best: { arm: Arm; lane: ArmStrip; score: number } | null = null;
+        for (const y of arms) {
+          if (y === x) continue;
+          for (const tout of trams(y, 1)) {
+            const straight = Math.cos(shortSweep(x.ang + Math.PI, y.ang));
+            const lateral = Math.abs((tout.l + tout.r) / 2 + (tin.l + tin.r) / 2);
+            const score = straight * 10 - lateral;
+            if (!best || score > best.score) best = { arm: y, lane: tout, score };
+          }
+        }
+        if (!best) continue;
+        const A = laneEnd(x, tin), B = laneEnd(best.arm, best.lane);
+        const d = Math.hypot(B.p[0] - A.p[0], B.p[1] - A.p[1]) * 0.42;
+        const p1 = add(A.p, mul(A.t, -d)), p2 = add(B.p, mul(B.t, -d));
+        const pts = Array.from({ length: 17 }, (_, i) => {
+          const u = i / 16, v = 1 - u;
+          return [
+            v * v * v * A.p[0] + 3 * v * v * u * p1[0] + 3 * v * u * u * p2[0] + u * u * u * B.p[0],
+            v * v * v * A.p[1] + 3 * v * v * u * p1[1] + 3 * v * u * u * p2[1] + u * u * u * B.p[1],
+          ] as Vec;
+        });
+        push(res.surfaces, band(pts, 1.3, -1.3), STRIP_TYPES.tram.color, 6);
+        for (const o of [-0.7175, 0.7175]) {
+          for (const poly of linePolygons(offsetPolyline(pts, o), 0.14)) push(res.markings, poly, '#696967');
+        }
+      }
     }
-  };
+  }
 
   // 6. Regelung: Halt-/Wartelinien, Pfeile, Schilder und Ampeln
   const control = controlOf(st);

@@ -394,6 +394,15 @@ export class Panel {
           'add-strip',
         ),
         toggle('Kurven glätten', road.smooth, (v) => this.change(() => (road.smooth = v))),
+        field(
+          'Höchstgeschwindigkeit',
+          select(
+            [{ value: '', label: 'Ohne Schild' }, ...[10, 20, 30, 40, 50, 60, 70, 80, 100].map((v) => ({ value: String(v), label: `${v} km/h` }))],
+            road.speed ? String(road.speed) : '',
+            (v) => this.change(() => (road.speed = v ? +v : undefined)),
+            'speed',
+          ),
+        ),
       ),
     ];
   }

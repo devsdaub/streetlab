@@ -1,6 +1,6 @@
 import type { Feature, Polygon } from 'geojson';
 import { add, cumulativeLength, leftNormal, linePolygons, mul, offsetPolyline, pointAt, type Vec } from './geometry';
-import { bus, cyclist, pedestrian, roadText, tram, type Shape } from './glyphs';
+import { bus, cyclist, pedestrian, roadText, tram, truck, van, type Shape } from './glyphs';
 import { STRIP_TYPES, type Planting, type Strip } from './model';
 
 /** Details eines Streifens: Pfeile, Parkstände, Autos, Gleise, Bepflanzung. */
@@ -165,6 +165,15 @@ export function stripDecor(
     if (strip.type === 'drive') {
       for (const { s, k: i } of spots(28, 'v', 0.45)) {
         const rnd = rand(`${strip.id}:c${i}`);
+        const kind = rnd();
+        if (kind < 0.08) {
+          placeShapes(s, truck(), k, out.decor);
+          continue;
+        }
+        if (kind < 0.18) {
+          placeShapes(s, van(CAR_COLORS[Math.floor(rnd() * CAR_COLORS.length)]), k, out.decor);
+          continue;
+        }
         const { body, glass } = carShape(4.4 + rnd() * 0.4, 1.85);
         const sh: Shape[] = [
           { pts: body.map(([x, y]) => [x + 0.25, y - 0.25] as Vec), color: 'rgba(0,0,0,0.35)', rank: 1 },
@@ -201,10 +210,13 @@ export function stripDecor(
       const scale = strip.type === 'bike' ? 0.45 : 1;
       const a = keepOut[0] > 0 ? keepOut[0] + 30 : 4, b = L - (keepOut[1] > 0 ? keepOut[1] + 30 : 4);
       let at = positions(60, 25, a, b).map((p) => p.s);
-      if (strip.type === 'bus') {
-        // „BUS“ auf der Fahrbahn, in Fahrtrichtung lesbar, 8 m hinter jedem Pfeil
+      const word = strip.text?.trim() || (strip.type === 'bus' ? 'BUS' : '');
+      if (word) {
+        // Schrift auf der Fahrbahn, in Fahrtrichtung lesbar, 9 m hinter jedem Pfeil
         const k = strip.dir === -1 ? -1 : 1;
-        for (const s of at) placeShapes(s - 8 * k, roadText('BUS'), k, out.markings);
+        const big = strip.type === 'bike' ? [1.2, 0.42] : [2.4, 0.7];
+        const textAt = at.length ? at : [L / 2];
+        for (const s of textAt) placeShapes(s - 9 * k, roadText(word, big[0], big[1]), k, out.markings);
       }
       if (!at.length && b - a > 2) at = [(a + b) / 2];
       const shape = ARROW.map(([x, y]) => [x * scale, y * scale] as Vec);
@@ -224,11 +236,43 @@ export function stripDecor(
     }
     case 'parking': {
       // Parkstände (5,75 m) mit Trennmarkierung und geparkten Autos
-      const bay = 5.75;
       const r = (k: number) => rand(`${strip.id}:${k}`);
       // vor Kreuzungen und Querungen 5 m frei (StVO)
       const a = keepOut[0] > 0 ? keepOut[0] + 5 : 0.3;
       const b = L - (keepOut[1] > 0 ? keepOut[1] + 5 : 0.3);
+      const angle = strip.parkAngle ?? 0;
+      if (angle) {
+        // Schräg/senkrecht: Stände 2,5 m breit; Autos zeigen mit der Front zur Fahrbahn
+        const rad = (angle * Math.PI) / 180;
+        const pitch = 2.5 / Math.sin(rad);
+        const toRoad = mid > 0 ? -1 : 1; // Richtung zur Fahrbahn (quer)
+        const slant = Math.cos(rad) / Math.sin(rad); // Versatz längs je Meter quer
+        // Standlinien: schräg über den Streifen
+        for (const { s } of positions(pitch, 0, a, b)) {
+          const f0 = frame(line, s);
+          const at2 = (u: number, v: number) => add(add(f0.p, mul(f0.t, u)), mul(f0.n, v));
+          const half = w / 2;
+          const p1 = at2(-slant * half * toRoad, -half * toRoad), p2 = at2(slant * half * toRoad, half * toRoad);
+          for (const poly of linePolygons([p1, p2], 0.1)) push(out.markings, poly, '#e6e4dc');
+        }
+        // Autos entlang der Standlinien
+        for (const { s, k } of positions(pitch, pitch / 2, a + 1.5, b - 1.5)) {
+          const rnd = r(k);
+          if (rnd() > 0.7) continue;
+          const f0 = frame(line, s);
+          const len = Math.min(4.6, w / Math.sin(rad) - 0.4);
+          const { body, glass } = carShape(len, 1.8);
+          // Fahrzeugachse: quer zur Straße, um (90° − Winkel) geneigt; Front zur Fahrbahn
+          const dirV = add(mul(f0.n, toRoad * Math.sin(rad)), mul(f0.t, toRoad * Math.cos(rad)));
+          const sideV: Vec = [-dirV[1], dirV[0]];
+          const map2 = (pts: Vec[]) => pts.map(([x, y]) => add(add(f0.p, mul(dirV, x)), mul(sideV, y)));
+          push(out.decor, map2(body).map((p) => add(p, [0.25, -0.25])), 'rgba(0,0,0,0.35)', 1);
+          push(out.decor, map2(body), CAR_COLORS[Math.floor(rnd() * CAR_COLORS.length)], 2);
+          push(out.decor, map2(glass), '#26292d', 3);
+        }
+        break;
+      }
+      const bay = 5.75;
       for (const { s } of positions(bay, 0, a, b)) {
         push(out.markings, place(line, s, [[-0.05, -w / 2], [0.05, -w / 2], [0.05, w / 2], [-0.05, w / 2]]), '#e6e4dc');
       }

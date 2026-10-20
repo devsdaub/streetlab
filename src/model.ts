@@ -25,6 +25,10 @@ export interface Strip {
   planting?: Planting;
   /** Abbiegepfeile vor der Kreuzung (Fahrstreifen) */
   turn?: Turn;
+  /** Parkwinkel: 0 = längs, 45 = schräg, 90 = senkrecht */
+  parkAngle?: 0 | 45 | 90;
+  /** Schrift auf der Fahrbahn, z. B. „30“, „TAXI“ */
+  text?: string;
 }
 
 export type Planting = 'lawn' | 'trees' | 'bushes' | 'flowers' | 'mixed';
@@ -47,6 +51,8 @@ export interface Road {
   /** weitere Abschnitte: ab Stützpunkt `index` gilt `profile` (aufsteigend sortiert) */
   sections?: Section[];
   smooth: boolean;
+  /** zulässige Höchstgeschwindigkeit (km/h) — Schilder an Anfang und Ende */
+  speed?: number;
 }
 
 export interface Section {

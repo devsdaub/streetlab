@@ -16,6 +16,7 @@ import {
   type Vec,
 } from './geometry';
 import { stripColor, stripDecor } from './decor';
+import { speedSign } from './glyphs';
 import { buildJunction, type ArmInput, type JunctionInfo } from './junction';
 import {
   STRIP_TYPES,
@@ -127,6 +128,8 @@ function stripFeatures(
   phase = 0,
   keepOut: [number, number] = [0, 0],
   opts: RenderOptions = { style: 'de', traffic: false },
+  /** Rückschnitt der Mittelinsel (bei Querungen bis an den Knoten = Fußgänger-Insel) */
+  noses: [number, number] = keepOut,
 ): RoadFeatures {
   const { style } = opts;
   const out = emptyFeatures();
@@ -145,7 +148,7 @@ function stripFeatures(
         geometry: { type: 'Polygon', coordinates: [ring(pts)] },
       });
     const L = polylineLength(center);
-    const n0 = keepOut[0] > 0 ? keepOut[0] + 1 : 0, n1 = keepOut[1] > 0 ? keepOut[1] + 1 : 0;
+    const n0 = noses[0] > 0 ? noses[0] + 1 : 0, n1 = noses[1] > 0 ? noses[1] + 1 : 0;
     if (strip.type === 'median' && (n0 || n1) && L - n0 - n1 > strip.width) {
       // Mittelinsel endet vor der Kreuzung mit runder Nase, darunter Fahrbahn
       surface(band(center, left, right), STRIP_TYPES.drive.color, 4);
@@ -669,7 +672,7 @@ export class RoadRenderer {
       if (c.end) arms.set(c.end, [...(arms.get(c.end) ?? []), toArm(c, false)]);
     }
     /** je Zug: Rückschnitt Anfang/Ende, markierungsfreier Bereich Anfang/Ende */
-    const trims = new Map<string, [number, number, number, number]>();
+    const trims = new Map<string, [number, number, number, number, number, number]>();
     const junctionCache = new Map<string, { sig: string; res: ReturnType<typeof buildJunction> }>();
     for (const [k, list] of arms) {
       // Kreuzungen nur neu berechnen, wenn sich Arme oder Einstellungen geändert haben
@@ -683,9 +686,10 @@ export class RoadRenderer {
       markings.push(...j.markings);
       decor.push(...j.decor);
       for (const t of j.trims) {
-        const cur = trims.get(t.segId) ?? [0, 0, 0, 0];
+        const cur = trims.get(t.segId) ?? [0, 0, 0, 0, 0, 0];
         cur[t.atStart ? 0 : 1] = t.trim;
         cur[t.atStart ? 2 : 3] = t.keepOut;
+        cur[t.atStart ? 4 : 5] = t.median;
         trims.set(t.segId, cur);
       }
     }
@@ -703,7 +707,7 @@ export class RoadRenderer {
       decor.push(...f.decor);
     };
     for (const c of chains) {
-      const [t0, t1, k0, k1] = trims.get(c.id) ?? [0, 0, 0, 0];
+      const [t0, t1, k0, k1, m0, m1] = trims.get(c.id) ?? [0, 0, 0, 0, 0, 0];
       const last = c.parts.length - 1;
       const pks = c.profiles.map((p) => JSON.stringify(p));
       // Länge der Verziehung an jeder inneren Teilgrenze (0 = gleicher Querschnitt)
@@ -734,10 +738,11 @@ export class RoadRenderer {
         const phase = Math.max(0, lo) - t0;
         // Strichmuster ab dem Kreuzungsrand takten, vor Haltlinien/Querungen frei lassen
         const keepOut: [number, number] = [k === 0 ? k0 : 0, k === last ? k1 : 0];
+        const noses: [number, number] = [k === 0 ? m0 : 0, k === last ? m1 : 0];
         if (hi - lo >= 0.05) {
-          const key = `${optKey}|${c.geomKey}|${k}|${lo.toFixed(2)}|${hi.toFixed(2)}|${keepOut}|${pks[k]}|${roadId}|${part.seg.section}`;
+          const key = `${optKey}|${c.geomKey}|${k}|${lo.toFixed(2)}|${hi.toFixed(2)}|${keepOut}|${noses}|${pks[k]}|${roadId}|${part.seg.section}`;
           cached(key, () =>
-            stripFeatures(roadId, part.seg.section, c.profiles[k], slicePolyline(c.center, Math.max(0, lo), Math.min(c.length, hi)), c.proj, phase, keepOut, opts),
+            stripFeatures(roadId, part.seg.section, c.profiles[k], slicePolyline(c.center, Math.max(0, lo), Math.min(c.length, hi)), c.proj, phase, keepOut, opts, noses),
           );
         }
         if (zOut > 0) {
@@ -773,6 +778,32 @@ export class RoadRenderer {
       });
     }
     this.featCache = featCache;
+
+    for (const road of roads) {
+      if (!road.speed || road.points.length < 2) continue;
+      const proj = localProjection(road.points[0]);
+      const pts = road.points.map(proj.fwd);
+      const sign = speedSign(road.speed);
+      const placeSign = (p: Vec, q: Vec, total: number) => {
+        // von p Richtung q, Schild rechts in dieser Fahrtrichtung
+        const l = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1;
+        const t: Vec = [(q[0] - p[0]) / l, (q[1] - p[1]) / l];
+        const n = leftNormal(t);
+        // auf dem Gehweg nahe dem äußeren Rand
+        const off = Math.max(0, total / 2 - 1.3);
+        const c: Vec = [p[0] + t[0] * 6 - n[0] * off, p[1] + t[1] * 6 - n[1] * off];
+        for (const sh of sign) {
+          decor.push({
+            type: 'Feature',
+            properties: { roadId: road.id, color: sh.color, rank: sh.rank ?? 6 },
+            geometry: { type: 'Polygon', coordinates: [sh.pts.map(([x, y]) => proj.inv([c[0] + t[0] * x + n[0] * y, c[1] + t[1] * x + n[1] * y]))] },
+          });
+        }
+      };
+      const width = (p: Strip[]) => p.reduce((s, x) => s + x.width, 0);
+      placeSign(pts[0], pts[1], width(road.profile));
+      placeSign(pts[pts.length - 1], pts[pts.length - 2], width(profileAt(road, pts.length - 1)));
+    }
 
     return {
       surfaces: { type: 'FeatureCollection', features: surfaces },

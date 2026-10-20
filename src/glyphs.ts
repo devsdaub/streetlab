@@ -125,6 +125,24 @@ export const trafficLight = (): Shape[] => [
   { pts: ellipse([-0.6, 0], 0.24, 0.24, 10), color: '#2fbf71', rank: 7 },
 ];
 
+/** Zeichen 274 „Zulässige Höchstgeschwindigkeit“: weißer Kreis, roter Rand, Zahl */
+export function speedSign(kmh: number): Shape[] {
+  // Ziffern liegen quer zur Fahrtrichtung lesbar (Draufsicht-Symbol)
+  // Ziffern wie Fahrbahnschrift: für den ankommenden Verkehr lesbar
+  const digits = roadText(String(kmh), 0.8, 0.46, '#1d1f22', 0.12).map((sh) => ({ ...sh, rank: 8 }));
+  return [
+    { pts: polygon(28, 1.25), color: '#c8262c', rank: 6 },
+    { pts: polygon(28, 0.98), color: '#ffffff', rank: 7 },
+    ...digits,
+  ];
+}
+
+/** Zeichen 350 „Fußgängerüberweg“: blaues Quadrat mit weißem Dreieck */
+export const zebraSign = (): Shape[] => [
+  { pts: roundRect(-0.85, -0.85, 0.85, 0.85, 0.15), color: '#1f5fbf', rank: 6 },
+  { pts: [[-0.55, -0.55], [-0.55, 0.55], [0.55, 0], [-0.55, -0.55]], color: '#ffffff', rank: 7 },
+];
+
 /** Haifischzähne (US-Wartelinie) über eine Breite von y0 bis y1 */
 export function sharkTeeth(y0: number, y1: number): Shape[] {
   const out: Shape[] = [];
@@ -139,32 +157,63 @@ export function sharkTeeth(y0: number, y1: number): Shape[] {
 
 // ---- Fahrbahnschrift (Blockbuchstaben, in Fahrtrichtung gestreckt) -------------
 
+const O_: Vec[] = [[0.18, 0], [0.62, 0], [0.8, 0.18], [0.8, 0.82], [0.62, 1], [0.18, 1], [0, 0.82], [0, 0.18], [0.18, 0]];
+const P_: Vec[] = [[0, 0], [0, 1], [0.62, 1], [0.8, 0.85], [0.8, 0.62], [0.62, 0.48], [0, 0.48]];
 const LETTERS: Record<string, Vec[][]> = {
+  A: [[[0, 0], [0.4, 1], [0.8, 0]], [[0.16, 0.4], [0.64, 0.4]]],
   B: [[[0, 0], [0, 1], [0.6, 1], [0.75, 0.88], [0.75, 0.62], [0.6, 0.5], [0, 0.5]], [[0.6, 0.5], [0.8, 0.38], [0.8, 0.12], [0.62, 0], [0, 0]]],
-  U: [[[0, 1], [0, 0.18], [0.18, 0], [0.62, 0], [0.8, 0.18], [0.8, 1]]],
+  C: [[[0.8, 0.85], [0.62, 1], [0.18, 1], [0, 0.82], [0, 0.18], [0.18, 0], [0.62, 0], [0.8, 0.15]]],
+  D: [[[0, 0], [0, 1], [0.5, 1], [0.8, 0.75], [0.8, 0.25], [0.5, 0], [0, 0]]],
+  E: [[[0.8, 1], [0, 1], [0, 0], [0.8, 0]], [[0, 0.5], [0.6, 0.5]]],
+  F: [[[0.8, 1], [0, 1], [0, 0]], [[0, 0.5], [0.6, 0.5]]],
+  G: [[[0.8, 0.85], [0.62, 1], [0.18, 1], [0, 0.82], [0, 0.18], [0.18, 0], [0.62, 0], [0.8, 0.18], [0.8, 0.45], [0.45, 0.45]]],
+  H: [[[0, 0], [0, 1]], [[0.8, 0], [0.8, 1]], [[0, 0.5], [0.8, 0.5]]],
+  I: [[[0.4, 0], [0.4, 1]]],
+  J: [[[0.8, 1], [0.8, 0.2], [0.6, 0], [0.2, 0], [0, 0.2]]],
+  K: [[[0, 0], [0, 1]], [[0.8, 1], [0, 0.45]], [[0.25, 0.6], [0.8, 0]]],
+  L: [[[0, 1], [0, 0], [0.8, 0]]],
+  M: [[[0, 0], [0, 1], [0.4, 0.5], [0.8, 1], [0.8, 0]]],
+  N: [[[0, 0], [0, 1], [0.8, 0], [0.8, 1]]],
+  O: [O_],
+  P: [P_],
+  Q: [O_, [[0.5, 0.25], [0.85, -0.05]]],
+  R: [P_, [[0.4, 0.48], [0.8, 0]]],
   S: [[[0.8, 0.88], [0.62, 1], [0.18, 1], [0, 0.85], [0, 0.62], [0.18, 0.5], [0.62, 0.5], [0.8, 0.38], [0.8, 0.15], [0.62, 0], [0.18, 0], [0, 0.12]]],
   T: [[[0, 1], [0.8, 1]], [[0.4, 1], [0.4, 0]]],
-  O: [[[0.18, 0], [0.62, 0], [0.8, 0.18], [0.8, 0.82], [0.62, 1], [0.18, 1], [0, 0.82], [0, 0.18], [0.18, 0]]],
-  P: [[[0, 0], [0, 1], [0.62, 1], [0.8, 0.85], [0.8, 0.62], [0.62, 0.48], [0, 0.48]]],
-  A: [[[0, 0], [0.4, 1], [0.8, 0]], [[0.16, 0.4], [0.64, 0.4]]],
+  U: [[[0, 1], [0, 0.18], [0.18, 0], [0.62, 0], [0.8, 0.18], [0.8, 1]]],
+  V: [[[0, 1], [0.4, 0], [0.8, 1]]],
+  W: [[[0, 1], [0.2, 0], [0.4, 0.6], [0.6, 0], [0.8, 1]]],
   X: [[[0, 0], [0.8, 1]], [[0, 1], [0.8, 0]]],
-  I: [[[0.4, 0], [0.4, 1]]],
+  Y: [[[0, 1], [0.4, 0.5], [0.8, 1]], [[0.4, 0.5], [0.4, 0]]],
+  Z: [[[0, 1], [0.8, 1], [0, 0], [0.8, 0]]],
+  '0': [O_],
+  '1': [[[0.2, 0.8], [0.45, 1], [0.45, 0]], [[0.15, 0], [0.75, 0]]],
+  '2': [[[0, 0.8], [0.2, 1], [0.6, 1], [0.8, 0.8], [0.8, 0.6], [0, 0], [0.8, 0]]],
+  '3': [[[0, 0.9], [0.15, 1], [0.65, 1], [0.8, 0.85], [0.8, 0.62], [0.6, 0.5], [0.3, 0.5]], [[0.6, 0.5], [0.8, 0.38], [0.8, 0.15], [0.65, 0], [0.15, 0], [0, 0.1]]],
+  '4': [[[0.6, 0], [0.6, 1], [0, 0.3], [0.8, 0.3]]],
+  '5': [[[0.8, 1], [0.05, 1], [0, 0.55], [0.6, 0.6], [0.8, 0.42], [0.8, 0.15], [0.62, 0], [0.15, 0], [0, 0.12]]],
+  '6': [[[0.7, 1], [0.3, 1], [0, 0.7], [0, 0.18], [0.18, 0], [0.62, 0], [0.8, 0.18], [0.8, 0.42], [0.62, 0.58], [0.18, 0.58], [0, 0.42]]],
+  '7': [[[0, 1], [0.8, 1], [0.3, 0]]],
+  '8': [[[0.4, 0.5], [0.1, 0.62], [0.1, 0.88], [0.25, 1], [0.55, 1], [0.7, 0.88], [0.7, 0.62], [0.4, 0.5], [0.05, 0.38], [0.05, 0.12], [0.2, 0], [0.6, 0], [0.75, 0.12], [0.75, 0.38], [0.4, 0.5]]],
+  '9': [[[0.8, 0.58], [0.62, 0.42], [0.18, 0.42], [0, 0.58], [0, 0.82], [0.18, 1], [0.62, 1], [0.8, 0.82], [0.8, 0.3], [0.5, 0], [0.1, 0]]],
 };
+const UMLAUT: Record<string, string> = { Ä: 'A', Ö: 'O', Ü: 'U', ß: 'S' };
 
 /**
  * Wort auf der Fahrbahn, für den ankommenden Verkehr lesbar: Buchstaben 1,6 m hoch
  * (in Fahrtrichtung), 0,5 m breit; die erste Zeile liegt dem Fahrer am nächsten.
  */
-export function roadText(word: string, height = 1.6, width = 0.55): Shape[] {
+export function roadText(word: string, height = 1.6, width = 0.55, color = WHITE, line = 0.15): Shape[] {
   const out: Shape[] = [];
-  const total = word.length * width * 1.35;
-  [...word].forEach((ch, i) => {
+  const chars = [...word.toUpperCase()].map((c) => UMLAUT[c] ?? c);
+  const total = chars.length * width * 1.35;
+  chars.forEach((ch, i) => {
     const strokes = LETTERS[ch];
     if (!strokes) return;
     const y0 = total / 2 - i * width * 1.35;
     for (const s of strokes) {
       // Buchstabenkoordinaten (u nach rechts, v nach oben) → (x = v·Höhe, y = −u·Breite)
-      out.push(...stroke(s.map(([u, v]) => [v * height - height / 2, y0 - u * width] as Vec), WHITE, 0.15));
+      out.push(...stroke(s.map(([u, v]) => [v * height - height / 2, y0 - u * width] as Vec), color, line));
     }
   });
   return out;
@@ -196,6 +245,30 @@ export function tram(): Shape[] {
   out.push({ pts: roundRect(14.6, -1.15, 15.0, 1.15, 0.15), color: '#26292d', rank: 3 });
   out.push({ pts: roundRect(-15.0, -1.15, -14.6, 1.15, 0.15), color: '#26292d', rank: 3 });
   return out;
+}
+
+/** Lkw (ca. 10 m): Fahrerhaus und Aufbau */
+export function truck(color = '#e9e6df'): Shape[] {
+  const box = roundRect(-5.2, -1.25, 2.6, 1.25, 0.15);
+  const cab = roundRect(2.8, -1.2, 5.0, 1.2, 0.4);
+  return [
+    shadow(roundRect(-5.2, -1.25, 5.0, 1.25, 0.3)),
+    { pts: box, color, rank: 2 },
+    { pts: roundRect(-4.9, -1.0, 2.3, 1.0, 0.1), color: '#d5d1c8', rank: 3 },
+    { pts: cab, color: '#2c4a7a', rank: 2 },
+    { pts: roundRect(4.0, -1.0, 4.6, 1.0, 0.12), color: '#26292d', rank: 3 },
+  ];
+}
+
+/** Transporter (ca. 5,5 m) */
+export function van(color = '#f1efe9'): Shape[] {
+  const body = roundRect(-2.75, -1.0, 2.75, 1.0, 0.35);
+  return [
+    shadow(body),
+    { pts: body, color, rank: 2 },
+    { pts: roundRect(1.3, -0.82, 1.9, 0.82, 0.12), color: '#26292d', rank: 3 },
+    { pts: roundRect(-2.4, -0.8, 1.1, 0.8, 0.1), color: '#dddad3', rank: 3 },
+  ];
 }
 
 export function cyclist(): Shape[] {

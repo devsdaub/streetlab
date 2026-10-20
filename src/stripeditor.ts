@@ -74,6 +74,42 @@ export function stripDetails(ctx: StripContext): HTMLElement {
       ),
     );
   }
+  if (s.type === 'parking') {
+    extras.push(
+      field(
+        'Aufstellung',
+        segmented(
+          [
+            { value: 0, label: 'Längs' },
+            { value: 45, label: 'Schräg' },
+            { value: 90, label: 'Senkrecht' },
+          ],
+          s.parkAngle ?? 0,
+          (v) =>
+            change(() => {
+              s.parkAngle = v === 0 ? undefined : (v as 45 | 90);
+              s.width = v === 0 ? 2.0 : v === 45 ? 4.6 : 5.0;
+            }),
+          'park-angle',
+        ),
+      ),
+    );
+  }
+  if (s.type === 'drive' || s.type === 'bus' || s.type === 'bike') {
+    extras.push(
+      field(
+        'Schrift',
+        h('input', {
+          class: 'text-input',
+          value: s.text ?? '',
+          placeholder: s.type === 'bus' ? 'BUS' : 'z. B. 30, TAXI',
+          maxlength: 8,
+          'data-action': 'strip-text',
+          onchange: (e) => change(() => (s.text = (e.target as HTMLInputElement).value.trim().toUpperCase() || undefined)),
+        }),
+      ),
+    );
+  }
   if (info.planted) {
     const current = s.planting ?? (s.type === 'green' ? 'trees' : '');
     extras.push(

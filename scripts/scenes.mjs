@@ -79,4 +79,16 @@ scenes.stress = {
     road('bahn-s', [[150, 0], [160, -40], [190, -80]], [S('sidewalk', 3), S('drive', 3.25, -1), S('tram', 3.2, -1), S('tram', 3.2, 1), S('drive', 3.25, 1), S('sidewalk', 3)]),
   ],
 };
+// Streetcraft-Elemente: Parkwinkel, Schrift, Tempo, Insel an Querung, Gleise durch Kreuzung
+const P = (a) => ({ ...S('parking', a === 90 ? 5 : a === 45 ? 4.6 : 2), ...(a ? { parkAngle: a } : {}) });
+scenes.assets = {
+  version: 1, name: 'Elemente', traffic: true, view: { center: ll(60, -10), zoom: 18.3 },
+  junctions: { [key(ll(120, 0))]: { kind: 'cross', radius: 8, crossing: 'zebra', bikeCrossing: true, stopLines: true, control: 'signals', rbRadius: 15, rbLane: 6.5 } },
+  roads: [
+    { ...road('parken', [[-40, 0], [120, 0]], [S('sidewalk', 2.5), P(90), { ...S('drive', 3.25, -1), text: '30' }, { ...S('drive', 3.25, 1), text: '30' }, P(45), S('sidewalk', 2.5)]), speed: 30 },
+    road('ost', [[120, 0], [200, 0]], [S('sidewalk', 3), S('drive', 3.25, -1), S('tram', 3.2, -1), S('tram', 3.2, 1), S('drive', 3.25, 1), S('sidewalk', 3)]),
+    road('nord', [[120, 0], [120, 60]], [S('sidewalk', 3), S('drive', 3.25, -1), S('median', 2.5), S('drive', 3.25, 1), S('sidewalk', 3)]),
+    road('sued', [[120, 0], [125, -40], [150, -70]], [S('sidewalk', 3), S('drive', 3.25, -1), S('tram', 3.2, -1), S('tram', 3.2, 1), S('drive', 3.25, 1), S('sidewalk', 3)]),
+  ],
+};
 export { ll };

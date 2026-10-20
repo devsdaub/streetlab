@@ -246,3 +246,5 @@ details.group[open] summary .ico { transform: none; }
 .preset .thumb { height: 74px; border-radius: 5px; overflow: hidden; margin-bottom: 3px; }
 .preset-name { font-weight: 500; font-size: 12px; line-height: 1.3; }
 .preset-meta { font-size: 11px; color: var(--muted); }
+.text-input { width: 100%; height: 30px; padding: 0 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); text-transform: uppercase; }
+.text-input:focus { outline: 0; border-color: var(--accent); }
