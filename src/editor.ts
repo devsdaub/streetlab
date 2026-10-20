@@ -3,7 +3,8 @@ import type { Feature } from 'geojson';
 import { EMPTY, SURFACE_LAYERS, setData, setStripHighlight } from './map';
 import type { JunctionInfo } from './junction';
 import type { TransitionInfo } from './render';
-import { defaultJunction, ensureSection, insertPoint, presetProfile, removePoint, uid, type LngLat, type Road, type Strip } from './model';
+import { defaultJunction, ensureSection, insertPoint, presetProfile, removePoint, sectionProfile, uid, type LngLat, type Road, type Strip } from './model';
+import { localProjection, type Vec } from './geometry';
 import { nodeKey } from './render';
 import type { Store } from './store';
 import { connectRoad } from './topology';
@@ -52,9 +53,24 @@ export class Editor {
   private hover: LngLat | null = null;
   private hoverSnapped = false;
   private drag: { key: string; members: Member[] } | null = null;
+  /** ganze Straße verschieben: Ausgangspunkt und ursprüngliche Lage aller bewegten Punkte */
+  private roadDrag: { origin: LngLat; start: { x: number; y: number }; moved: boolean; items: { road: Road; index: number; orig: LngLat; key: string }[] } | null = null;
+  /** Streifenbreite an einer Kante ziehen */
+  private widthDrag: {
+    road: Road;
+    profile: Strip[];
+    k: number;
+    origin: Vec;
+    n: Vec;
+    proj: ReturnType<typeof localProjection>;
+    widths: number[];
+    boundary: number;
+  } | null = null;
   private suppressClickUntil = 0;
 
   constructor(private map: MapLibre, private store: Store) {
+    map.on('mousedown', 'width-handles', (e) => this.startWidthDrag(e));
+    map.on('mousedown', (e) => this.startRoadDrag(e));
     map.on('mousedown', 'edit-vertices', (e) => this.startVertexDrag(e));
     map.on('mousedown', 'edit-midpoints', (e) => this.startMidpointDrag(e));
     map.on('contextmenu', 'edit-vertices', (e) => this.deleteVertex(e));
@@ -211,6 +227,18 @@ export class Editor {
         type: 'FeatureCollection',
         features: road.points.map((p, index) => point(p, { index, section: starts.has(index) })),
       });
+      const h = this.mode === 'select' && !this.laneEdit ? this.widthHandleFrame(road) : null;
+      if (h) {
+        const total = h.profile.reduce((s, x) => s + x.width, 0);
+        let off = total / 2;
+        const at = (o: number) => h.proj.inv([h.p[0] + h.n[0] * o, h.p[1] + h.n[1] * o]);
+        const handles = [point(at(off), { k: -1 })];
+        h.profile.forEach((x, k) => {
+          off -= x.width;
+          handles.push(point(at(off), { k }));
+        });
+        setData(this.map, 'width-handles', { type: 'FeatureCollection', features: handles });
+      } else setData(this.map, 'width-handles', EMPTY);
       setData(this.map, 'edit-midpoints', {
         type: 'FeatureCollection',
         features: road.points.slice(1).map((p, i) => {
@@ -219,7 +247,7 @@ export class Editor {
         }),
       });
     } else {
-      for (const s of ['edit-line', 'edit-vertices', 'edit-midpoints']) setData(this.map, s, EMPTY);
+      for (const s of ['edit-line', 'edit-vertices', 'edit-midpoints', 'width-handles']) setData(this.map, s, EMPTY);
       if (node) setData(this.map, 'edit-vertices', { type: 'FeatureCollection', features: [point(node, { index: -1 })] });
     }
 
@@ -359,17 +387,21 @@ export class Editor {
     if (!p) return;
     e.preventDefault();
     this.store.checkpoint();
-    this.startDrag(p);
+    // Alt: nur den Punkt der gewählten Straße bewegen — löst ihn vom Knoten
+    if (e.originalEvent.altKey && road && index >= 0) this.startDrag(p, [{ road, index }]);
+    else this.startDrag(p);
   }
 
   /** Ein Knotenpunkt gehört allen Straßen, die ihn teilen — sie werden gemeinsam verschoben. */
-  private startDrag(p: LngLat) {
+  private startDrag(p: LngLat, only?: Member[]) {
     const key = nodeKey(p);
-    const members: Member[] = [];
-    for (const r of this.store.project.roads) {
-      r.points.forEach((q, i) => {
-        if (nodeKey(q) === key) members.push({ road: r, index: i });
-      });
+    const members: Member[] = only ?? [];
+    if (!only) {
+      for (const r of this.store.project.roads) {
+        r.points.forEach((q, i) => {
+          if (nodeKey(q) === key) members.push({ road: r, index: i });
+        });
+      }
     }
     this.drag = { key, members };
     this.onDragStart(new Set(members.map((m) => m.road.id)));
@@ -405,7 +437,116 @@ export class Editor {
     delete j[from];
   }
 
+  /** Klick auf die Fläche der gewählten Straße und ziehen: ganze Straße verschieben */
+  private startRoadDrag(e: MapMouseEvent) {
+    if (this.mode !== 'select' || !this.selectedId || e.originalEvent.button !== 0 || this.laneEdit) return;
+    const p = e.point;
+    const handles = this.map.queryRenderedFeatures([p.x, p.y], { layers: ['edit-vertices', 'edit-midpoints', 'width-handles'] });
+    if (handles.length) return;
+    const box: [PointLike, PointLike] = [
+      [p.x - 2, p.y - 2],
+      [p.x + 2, p.y + 2],
+    ];
+    const hit = this.map.queryRenderedFeatures(box, { layers: SURFACE_LAYERS }).find((f) => f.properties?.roadId === this.selectedId);
+    const road = this.store.road(this.selectedId);
+    if (!hit || !road) return;
+    e.preventDefault();
+    const detach = e.originalEvent.altKey;
+    const items: { road: Road; index: number; orig: LngLat; key: string }[] = [];
+    road.points.forEach((q, index) => {
+      const key = nodeKey(q);
+      items.push({ road, index, orig: [q[0], q[1]], key });
+      // angeschlossene Straßen bleiben verbunden (ihre Knotenpunkte wandern mit), außer mit Alt
+      if (detach) return;
+      for (const r of this.store.project.roads) {
+        if (r === road) continue;
+        r.points.forEach((x, i) => nodeKey(x) === key && items.push({ road: r, index: i, orig: [x[0], x[1]], key }));
+      }
+    });
+    // erst ab 4 px Bewegung wird verschoben — ein einfacher Klick wählt weiter einen Streifen
+    this.roadDrag = { origin: e.lngLat.toArray() as LngLat, start: { x: p.x, y: p.y }, moved: false, items };
+  }
+
+  /** Griff an einer Streifenkante: Breite ändern, die Kante folgt der Maus */
+  private startWidthDrag(e: MapLayerMouseEvent) {
+    const f = e.features?.[0];
+    const road = this.store.road(this.selectedId);
+    if (this.mode !== 'select' || !f || !road || e.originalEvent.button !== 0) return;
+    e.preventDefault();
+    const h = this.widthHandleFrame(road);
+    if (!h) return;
+    this.store.checkpoint();
+    const k = f.properties!.k as number;
+    const total = h.profile.reduce((s, x) => s + x.width, 0);
+    const boundary = k < 0 ? total / 2 : total / 2 - h.profile.slice(0, k + 1).reduce((s, x) => s + x.width, 0);
+    this.widthDrag = { road, profile: h.profile, k, origin: h.p, n: h.n, proj: h.proj, widths: h.profile.map((x) => x.width), boundary };
+    this.onDragStart(new Set([road.id]));
+  }
+
+  /** Lage der Breiten-Griffe: Mitte des gewählten Abschnitts, quer zur Straße */
+  private widthHandleFrame(road: Road) {
+    const k = Math.min(this.selectedSection, road.sections?.length ?? 0);
+    const from = k === 0 ? 0 : road.sections![k - 1].index;
+    const to = road.sections?.[k]?.index ?? road.points.length - 1;
+    const pts = road.points.slice(from, to + 1);
+    if (pts.length < 2) return null;
+    const proj = localProjection(pts[0]);
+    const local = pts.map(proj.fwd);
+    const total = local.reduce((s, q, i) => (i ? s + Math.hypot(q[0] - local[i - 1][0], q[1] - local[i - 1][1]) : 0), 0);
+    let acc = 0;
+    for (let i = 1; i < local.length; i++) {
+      const [a, b] = [local[i - 1], local[i]];
+      const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (acc + l >= total / 2 && l > 0) {
+        const u = (total / 2 - acc) / l;
+        const p: Vec = [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+        const n: Vec = [-(b[1] - a[1]) / l, (b[0] - a[0]) / l];
+        return { p, n, proj, profile: sectionProfile(road, k) };
+      }
+      acc += l;
+    }
+    return null;
+  }
+
   private onMove(e: MapMouseEvent) {
+    if (this.roadDrag) {
+      if (!this.roadDrag.moved) {
+        if (Math.hypot(e.point.x - this.roadDrag.start.x, e.point.y - this.roadDrag.start.y) < 4) return;
+        this.roadDrag.moved = true;
+        this.store.checkpoint();
+        this.map.getCanvas().style.cursor = 'grabbing';
+        this.onDragStart(new Set(this.roadDrag.items.map((x) => x.road.id)));
+      }
+      const [lng, lat] = e.lngLat.toArray();
+      const [dx, dy] = [lng - this.roadDrag.origin[0], lat - this.roadDrag.origin[1]];
+      const keys = new Map<string, string>();
+      for (const it of this.roadDrag.items) {
+        it.road.points[it.index] = [it.orig[0] + dx, it.orig[1] + dy];
+        keys.set(it.key, nodeKey(it.road.points[it.index]));
+      }
+      // Kreuzungseinstellungen wandern mit
+      for (const it of this.roadDrag.items) {
+        const now = keys.get(it.key)!;
+        if (now !== it.key) {
+          this.rekey(it.key, now);
+          it.key = now;
+          it.orig = [it.road.points[it.index][0] - dx, it.road.points[it.index][1] - dy];
+        }
+      }
+      this.store.changed('geometry');
+      return;
+    }
+    if (this.widthDrag) {
+      const w = this.widthDrag;
+      const m = w.proj.fwd(e.lngLat.toArray() as LngLat);
+      const o = (m[0] - w.origin[0]) * w.n[0] + (m[1] - w.origin[1]) * w.n[1];
+      // Kante folgt der Maus: bei mittiger Ausrichtung ändert sich die Breite um das Doppelte
+      const delta = w.k < 0 ? 2 * (o - w.boundary) : 2 * (w.boundary - o);
+      const i = Math.max(0, w.k);
+      w.profile[i].width = Math.max(0.3, Math.round((w.widths[i] + delta) * 20) / 20);
+      this.store.changed('geometry');
+      return;
+    }
     const noSnap = e.originalEvent.altKey;
     if (this.drag) {
       const { members } = this.drag;
@@ -428,12 +569,31 @@ export class Editor {
     }
     const overVertex =
       this.selectedId || this.selectedNode
-        ? this.map.queryRenderedFeatures(e.point, { layers: ['edit-vertices', 'edit-midpoints'] }).length > 0
+        ? this.map.queryRenderedFeatures(e.point, { layers: ['edit-vertices', 'edit-midpoints', 'width-handles'] }).length > 0
         : false;
     this.map.getCanvas().style.cursor = overVertex ? 'move' : '';
   }
 
   private endDrag() {
+    if (this.roadDrag) {
+      const { moved } = this.roadDrag;
+      const road = this.roadDrag.items[0]?.road;
+      this.roadDrag = null;
+      if (!moved) return; // nur geklickt: normale Auswahl per click-Ereignis
+      this.map.getCanvas().style.cursor = '';
+      this.onDragEnd();
+      this.suppressClickUntil = performance.now() + 100;
+      if (road) connectRoad(this.store.project.roads, road);
+      this.store.changed('structure');
+      return;
+    }
+    if (this.widthDrag) {
+      this.widthDrag = null;
+      this.onDragEnd();
+      this.suppressClickUntil = performance.now() + 100;
+      this.store.changed('structure');
+      return;
+    }
     if (!this.drag) return;
     const road = this.drag.members[0]?.road;
     this.drag = null;

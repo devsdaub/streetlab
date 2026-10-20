@@ -155,6 +155,7 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
       draft: geo(),
       'lane-links': geo(),
       'lane-ends': geo(),
+      'width-handles': geo(),
     },
     layers: [
       { id: 'background', type: 'background', paint: { 'background-color': '#26282b' } },
@@ -225,6 +226,18 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
           'circle-color': ['case', ['==', ['get', 'kind'], 'in'], '#22c55e', '#ef4444'],
           'circle-stroke-color': ['case', ['==', ['get', 'selected'], true], '#ffffff', '#111111'],
           'circle-stroke-width': ['case', ['==', ['get', 'selected'], true], 3, 1.5],
+        },
+      },
+      {
+        // Griffe an den Streifenkanten der gewählten Straße: ziehen ändert die Breite
+        id: 'width-handles',
+        type: 'circle',
+        source: 'width-handles',
+        paint: {
+          'circle-radius': 5,
+          'circle-color': '#ffffff',
+          'circle-stroke-color': '#5b8def',
+          'circle-stroke-width': 2,
         },
       },
       {

@@ -12,5 +12,6 @@ run junction-editor.mjs 2
 run mapedit.mjs 4
 run bike.mjs 3
 run interact.mjs 4
+run ui4.mjs 5
 run storage.mjs 5
 run perf.mjs 3

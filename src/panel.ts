@@ -551,8 +551,44 @@ export class Panel {
               }),
             ),
           ),
-      group(null, button('Standard wiederherstellen', () => this.change(() => delete j[key]), { kind: 'ghost' })),
+      group(
+        null,
+        h(
+          'div',
+          { class: 'row' },
+          button('Knoten lösen', () => this.detachNode(key), {
+            kind: 'ghost',
+            title: 'Straßenenden voneinander trennen (Alt beim Ziehen eines Punkts löst nur eine Straße)',
+            action: 'detach',
+          }),
+          button('Standard wiederherstellen', () => this.change(() => delete j[key]), { kind: 'ghost' }),
+        ),
+      ),
     ];
+  }
+
+  /** Straßenenden am Knoten um 1,5 m zurücksetzen — danach sind sie nicht mehr verbunden */
+  private detachNode(key: string) {
+    const roads = this.store.project.roads.filter((r) => r.points.some((p) => `${p[0].toFixed(8)},${p[1].toFixed(8)}` === key));
+    let moved = 0;
+    this.store.checkpoint();
+    roads.slice(1).forEach((r) => {
+      const n = r.points.length;
+      const at = r.points.findIndex((p) => `${p[0].toFixed(8)},${p[1].toFixed(8)}` === key);
+      if (at !== 0 && at !== n - 1) return; // durchlaufende Straße bleibt, die anderen lösen sich
+      const p = r.points[at], q = r.points[at === 0 ? 1 : n - 2];
+      const k = Math.cos((p[1] * Math.PI) / 180);
+      const len = Math.hypot((q[0] - p[0]) * 111320 * k, (q[1] - p[1]) * 111320) || 1;
+      const u = Math.min(0.45, 1.5 / len);
+      r.points[at] = [p[0] + (q[0] - p[0]) * u, p[1] + (q[1] - p[1]) * u];
+      moved++;
+    });
+    if (!moved) {
+      alert('Hier enden keine Straßen — durchgehende Straßen lassen sich nur durch Ziehen mit Alt lösen.');
+      return;
+    }
+    this.editor.select(null);
+    this.store.changed('structure');
   }
 
   private turnLane(key: string, i: number, turn: 'left' | 'right') {

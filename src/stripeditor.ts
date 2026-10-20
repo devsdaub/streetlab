@@ -1,5 +1,6 @@
 /** Bedienelemente für einen Streifen — gemeinsam für Inspektor und Kartenfenster. */
 import { stripColor } from './decor';
+import { profileSvg } from './presets';
 import {
   LINE_LABELS,
   PLANTING_LABELS,
@@ -174,9 +175,12 @@ export function stripDetails(ctx: StripContext): HTMLElement {
 /** Querschnitt als maßstäbliche Grafik; Klick wählt einen Streifen */
 export function profileBar(profile: Strip[], selected: string | null, onSelect: (id: string) => void): HTMLElement {
   const total = profile.reduce((s, x) => s + x.width, 0);
+  const preview = h('div', { class: 'profile-preview', title: 'Vorschau des Querschnitts' });
+  preview.innerHTML = profileSvg(profile, 3.6);
   return h(
     'div',
     { class: 'profile' },
+    preview,
     h(
       'div',
       { class: 'profile-bar' },
