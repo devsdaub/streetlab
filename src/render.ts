@@ -144,7 +144,7 @@ function stripFeatures(
     const surface = (pts: Vec[], color: string, rank: number) =>
       out.surfaces.push({
         type: 'Feature',
-        properties: { roadId, section, stripId: strip.id, color, rank },
+        properties: { roadId, section, stripId: strip.id, type: strip.type, color, rank },
         geometry: { type: 'Polygon', coordinates: [ring(pts)] },
       });
     const L = polylineLength(center);
@@ -329,7 +329,7 @@ function morphFeatures(
       if (ll.length < 2) return;
       out.surfaces.push({
         type: 'Feature',
-        properties: { roadId, section, stripId: m.src.id, transition: tKey, color: stripColor(strip), rank: STRIP_TYPES[strip.type].rank },
+        properties: { roadId, section, stripId: m.src.id, type: strip.type, transition: tKey, color: stripColor(strip), rank: STRIP_TYPES[strip.type].rank },
         geometry: { type: 'Polygon', coordinates: [ring([...ll, ...rr, ll[0]])] },
       });
     };
@@ -730,24 +730,49 @@ export class RoadRenderer {
         const ov = override(k);
         return ov ? Math.min(ov, shortest * 0.95) : Math.min(TRANSITION, shortest * 0.8);
       });
+      // Lage der Verziehung: mittig auf der Grenze, aber nie im Kreuzungsbereich
+      // (Querung, Haltlinie, Pfeile) — dort wird sie auf die freie Strecke geschoben
+      const freeLo = c.start ? t0 + k0 + 2 : 0, freeHi = c.length - (c.end ? t1 + k1 + 2 : 0);
+      const zStart = zone.map((z, k) => {
+        if (!z) return 0;
+        const room = freeHi - freeLo;
+        if (room < z) {
+          zone[k] = Math.max(Math.min(z, 2), room);
+          return room > 0 ? freeLo : c.bounds[k + 1] - zone[k] / 2;
+        }
+        return Math.min(Math.max(c.bounds[k + 1] - z / 2, freeLo), freeHi - z);
+      });
       c.parts.forEach((part, k) => {
-        const zIn = k > 0 ? zone[k - 1] : 0, zOut = zone[k];
-        const lo = k === 0 ? t0 : c.bounds[k] + zIn / 2 - OVERLAP;
-        const hi = k === last ? c.length - t1 : c.bounds[k + 1] - zOut / 2 + OVERLAP;
+        const zOut = zone[k];
+        const lo = k === 0 ? t0 : zone[k - 1] ? zStart[k - 1] + zone[k - 1] - OVERLAP : c.bounds[k] - OVERLAP;
+        const hi = k === last ? c.length - t1 : zOut ? zStart[k] + OVERLAP : c.bounds[k + 1] + OVERLAP;
         const roadId = part.seg.road.id;
-        const phase = Math.max(0, lo) - t0;
         // Strichmuster ab dem Kreuzungsrand takten, vor Haltlinien/Querungen frei lassen
         const keepOut: [number, number] = [k === 0 ? k0 : 0, k === last ? k1 : 0];
         const noses: [number, number] = [k === 0 ? m0 : 0, k === last ? m1 : 0];
         if (hi - lo >= 0.05) {
-          const key = `${optKey}|${c.geomKey}|${k}|${lo.toFixed(2)}|${hi.toFixed(2)}|${keepOut}|${noses}|${pks[k]}|${roadId}|${part.seg.section}`;
-          cached(key, () =>
-            stripFeatures(roadId, part.seg.section, c.profiles[k], slicePolyline(c.center, Math.max(0, lo), Math.min(c.length, hi)), c.proj, phase, keepOut, opts, noses),
-          );
+          // Liegt das Stück (wegen einer verschobenen Verziehung) teils auf der Nachbarstraße, an der
+          // Straßengrenze teilen: jedes Teilstück gehört der Straße, auf der es liegt (Auswahl, Greifen)
+          const cuts = [lo, ...c.bounds.slice(1, -1).filter((b) => b > lo + 0.05 && b < hi - 0.05), hi];
+          for (let q = 0; q < cuts.length - 1; q++) {
+            const [p0, p1] = [cuts[q], cuts[q + 1]];
+            const m = (p0 + p1) / 2;
+            let o = k;
+            while (o > 0 && m < c.bounds[o]) o--;
+            while (o < last && m >= c.bounds[o + 1]) o++;
+            const owner = c.parts[o];
+            const ko: [number, number] = [q === 0 ? keepOut[0] : 0, q === cuts.length - 2 ? keepOut[1] : 0];
+            const no: [number, number] = [q === 0 ? noses[0] : 0, q === cuts.length - 2 ? noses[1] : 0];
+            const ph = Math.max(0, p0) - t0;
+            const key = `${optKey}|${c.geomKey}|${k}|${p0.toFixed(2)}|${p1.toFixed(2)}|${ko}|${no}|${pks[k]}|${owner.seg.road.id}|${owner.seg.section}`;
+            cached(key, () =>
+              stripFeatures(owner.seg.road.id, owner.seg.section, c.profiles[k], slicePolyline(c.center, Math.max(0, p0), Math.min(c.length, p1)), c.proj, ph, ko, opts, no),
+            );
+          }
         }
         if (zOut > 0) {
-          // Verziehung: erste Hälfte gehört zu diesem Teil, zweite zum nächsten
-          const b = c.bounds[k + 1], zs = b - zOut / 2;
+          // Verziehung: was vor der Grenze liegt, gehört zu diesem Teil, der Rest zum nächsten
+          const b = c.bounds[k + 1], zs = zStart[k], ze = zs + zOut;
           const tKey = boundary(k);
           // Zuordnung gilt je Übergang: Schlüssel „Grenze|Streifen-ID“
           const morph = alignProfiles(c.profiles[k], c.profiles[k + 1], (id) => opts.links?.[`${tKey}|${id}`]);
@@ -764,12 +789,11 @@ export class RoadRenderer {
             ],
           });
           const mKey = JSON.stringify(morph.map((x) => [x.aId, x.bId, x.quick])) + zOut.toFixed(2);
-          const halves: [number, number, string, number][] = [
-            [zs - OVERLAP, b + OVERLAP, roadId, part.seg.section],
-            [b - OVERLAP, b + zOut / 2 + OVERLAP, c.parts[k + 1].seg.road.id, c.parts[k + 1].seg.section],
-          ];
+          const halves: [number, number, string, number][] = [];
+          if (b > zs) halves.push([zs - OVERLAP, Math.min(b, ze) + OVERLAP, roadId, part.seg.section]);
+          if (b < ze) halves.push([Math.max(b, zs) - OVERLAP, ze + OVERLAP, c.parts[k + 1].seg.road.id, c.parts[k + 1].seg.section]);
           halves.forEach(([from, to, rid, sec], hk) => {
-            const key = `${optKey}|${c.geomKey}|m${k}.${hk}.${sec}|${pks[k]}|${pks[k + 1]}|${rid}|${mKey}`;
+            const key = `${optKey}|${c.geomKey}|m${k}.${hk}.${sec}|${from.toFixed(2)}|${to.toFixed(2)}|${pks[k]}|${pks[k + 1]}|${rid}|${mKey}`;
             cached(key, () =>
               morphFeatures(rid, sec, tKey, morph, slicePolyline(c.center, Math.max(0, from), Math.min(c.length, to)), Math.max(0, from), zs, zOut, c.proj, Math.max(0, from) - t0, style),
             );

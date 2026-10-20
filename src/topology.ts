@@ -36,8 +36,10 @@ const near = (p: LngLat, q: LngLat, m = 0.3) => {
  * Verknüpft `road` mit dem übrigen Netz: Stützpunkte, die auf einer anderen Straße liegen,
  * und echte Kreuzungen werden als gemeinsame Punkte in beide Straßen eingefügt.
  * Gibt true zurück, wenn etwas eingefügt wurde.
+ * crossings = false: nur eingerastete Punkte verbinden, keine neuen Kreuzungen anlegen (beim
+ * Verschieben ändert sich die Verknüpfung sonst unbemerkt).
  */
-export function connectRoad(roads: Road[], road: Road): boolean {
+export function connectRoad(roads: Road[], road: Road, crossings = true): boolean {
   const inserts = new Map<Road, { i: number; t: number; p: LngLat }[]>();
   const add = (r: Road, i: number, t: number, p: LngLat) => inserts.set(r, [...(inserts.get(r) ?? []), { i, t, p }]);
 
@@ -56,7 +58,7 @@ export function connectRoad(roads: Road[], road: Road): boolean {
         const t = paramOnSegment(p, a, b);
         if (t !== null) add(road, j, t, p);
       }
-      for (let i = 0; i < other.points.length - 1; i++) {
+      for (let i = 0; crossings && i < other.points.length - 1; i++) {
         const [c, d] = [other.points[i], other.points[i + 1]];
         const hit = crossSegments(a, b, c, d);
         if (!hit) continue;

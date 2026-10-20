@@ -114,6 +114,24 @@ export function removePoint(road: Road, i: number) {
   if (!road.sections.length) delete road.sections;
 }
 
+/**
+ * Direkt aufeinanderfolgende Punkte an (fast) derselben Stelle entfernen — sie erzeugen Stücke
+ * ohne Länge, an denen Darstellung und Simulation scheitern. Endpunkte bleiben erhalten
+ * (sie können an Knoten hängen). Gibt true zurück, wenn etwas entfernt wurde.
+ */
+export function cleanPoints(road: Road): boolean {
+  const M = 111320;
+  let changed = false;
+  for (let i = road.points.length - 1; i > 0 && road.points.length > 2; i--) {
+    const [a, b] = [road.points[i - 1], road.points[i]];
+    const d = Math.hypot((a[0] - b[0]) * M * Math.cos((a[1] * Math.PI) / 180), (a[1] - b[1]) * M);
+    if (d >= 0.05) continue;
+    removePoint(road, i === road.points.length - 1 ? i - 1 : i);
+    changed = true;
+  }
+  return changed;
+}
+
 /** Abschnittsgrenze an Stützpunkt i sicherstellen (Querschnitt bleibt zunächst gleich) */
 export function ensureSection(road: Road, i: number): number {
   if (i <= 0 || i >= road.points.length - 1) return sectionAt(road, i);

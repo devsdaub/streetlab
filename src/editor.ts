@@ -3,7 +3,7 @@ import type { Feature } from 'geojson';
 import { EMPTY, SURFACE_LAYERS, setData, setStripHighlight } from './map';
 import type { JunctionInfo } from './junction';
 import type { TransitionInfo } from './render';
-import { defaultJunction, ensureSection, insertPoint, presetProfile, removePoint, sectionProfile, uid, type LngLat, type Road, type Strip } from './model';
+import { cleanPoints, defaultJunction, ensureSection, insertPoint, presetProfile, removePoint, sectionProfile, uid, type LngLat, type Road, type Strip } from './model';
 import { localProjection, type Vec } from './geometry';
 import { nodeKey } from './render';
 import type { Store } from './store';
@@ -447,8 +447,12 @@ export class Editor {
       [p.x - 2, p.y - 2],
       [p.x + 2, p.y + 2],
     ];
-    const hit = this.map.queryRenderedFeatures(box, { layers: SURFACE_LAYERS }).find((f) => f.properties?.roadId === this.selectedId);
     const road = this.store.road(this.selectedId);
+    // auch die Kreuzungsflächen an den Knoten der gewählten Straße gehören zum Greifbereich
+    const nodes = new Set(road?.points.map((q) => nodeKey(q)));
+    const hit = this.map
+      .queryRenderedFeatures(box, { layers: SURFACE_LAYERS })
+      .find((f) => f.properties?.roadId === this.selectedId || (f.properties?.node && nodes.has(f.properties.node)));
     if (!hit || !road) return;
     e.preventDefault();
     const detach = e.originalEvent.altKey;
@@ -550,7 +554,9 @@ export class Editor {
     const noSnap = e.originalEvent.altKey;
     if (this.drag) {
       const { members } = this.drag;
-      const p = noSnap ? (e.lngLat.toArray() as LngLat) : this.snap(e.point, e.lngLat.toArray() as LngLat, members).p;
+      // freies Straßenende (nur eine Straße, erster/letzter Punkt): großzügig einrasten
+      const free = members.length === 1 && (members[0].index === 0 || members[0].index === members[0].road.points.length - 1);
+      const p = noSnap ? (e.lngLat.toArray() as LngLat) : this.snap(e.point, e.lngLat.toArray() as LngLat, members, free).p;
       for (const m of members) m.road.points[m.index] = [p[0], p[1]];
       const key = nodeKey(p);
       this.rekey(this.drag.key, key);
@@ -577,13 +583,12 @@ export class Editor {
   private endDrag() {
     if (this.roadDrag) {
       const { moved } = this.roadDrag;
-      const road = this.roadDrag.items[0]?.road;
       this.roadDrag = null;
       if (!moved) return; // nur geklickt: normale Auswahl per click-Ereignis
       this.map.getCanvas().style.cursor = '';
       this.onDragEnd();
       this.suppressClickUntil = performance.now() + 100;
-      if (road) connectRoad(this.store.project.roads, road);
+      // Verschieben ändert die Verknüpfung nicht (hin und zurück ergibt wieder denselben Stand)
       this.store.changed('structure');
       return;
     }
@@ -599,7 +604,11 @@ export class Editor {
     this.drag = null;
     this.onDragEnd();
     this.suppressClickUntil = performance.now() + 100;
-    if (road && connectRoad(this.store.project.roads, road)) this.store.changed('structure');
+    // Punkt auf einen Nachbarpunkt gezogen: doppelte Punkte (Stücke ohne Länge) entfernen
+    let cleaned = false;
+    for (const r of this.store.project.roads) cleaned = cleanPoints(r) || cleaned;
+    // nur einrasten lassen, keine neuen Kreuzungen durch das Ziehen
+    if ((road && connectRoad(this.store.project.roads, road, false)) || cleaned) this.store.changed('structure');
     else this.onChange();
   }
 
@@ -673,7 +682,12 @@ export class Editor {
    * auf Mittellinien — so entstehen gemeinsame Knoten, aus denen Kreuzungen und
    * nahtlose Übergänge berechnet werden.
    */
-  private snap(px: { x: number; y: number }, fallback: LngLat, skip: Member[] = []): { p: LngLat; snapped: boolean } {
+  /**
+   * generous: großer Fangradius (ganze Fahrbahnbreite) — beim Zeichnen und für ein freies
+   * Straßenende. Bestehende Knoten und Zwischenpunkte rasten nur knapp ein, sonst entstehen
+   * beim Verschieben ungewollt neue Verbindungen.
+   */
+  private snap(px: { x: number; y: number }, fallback: LngLat, skip: Member[] = [], generous = true): { p: LngLat; snapped: boolean } {
     const skipped = (r: Road, i: number) => skip.some((s) => s.road === r && s.index === i);
     const roads = this.store.project.roads;
     let best: LngLat | null = null;
@@ -692,7 +706,7 @@ export class Editor {
       road.points.forEach((p, i) => {
         if (skipped(road, i)) return;
         const isEnd = i === 0 || i === last;
-        consider(p, isEnd ? Math.max(SNAP_PX + 6, this.halfWidthPx(road, p) + 6) : SNAP_PX);
+        consider(p, isEnd && generous ? Math.max(SNAP_PX + 6, this.halfWidthPx(road, p) + 6) : SNAP_PX);
       });
     }
     this.draft.forEach((p) => consider(p, SNAP_PX));
@@ -700,7 +714,7 @@ export class Editor {
 
     // 2. Mittellinien: nächster Punkt auf einer Strecke, interpoliert in Grad → liegt exakt darauf
     for (const road of roads) {
-      const radius = Math.max(SNAP_PX, this.halfWidthPx(road, road.points[0]) * 0.8);
+      const radius = generous ? Math.max(SNAP_PX, this.halfWidthPx(road, road.points[0]) * 0.8) : SNAP_PX;
       for (let i = 0; i < road.points.length - 1; i++) {
         if (skipped(road, i) || skipped(road, i + 1)) continue;
         const [a, b] = [road.points[i], road.points[i + 1]];

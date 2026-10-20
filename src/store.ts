@@ -1,5 +1,5 @@
 import { idbGet, idbSet } from './idb';
-import { emptyProject, type Project, type Road } from './model';
+import { cleanPoints, emptyProject, type Project, type Road } from './model';
 
 const STORAGE_KEY = 'streetlab.project.v1';
 
@@ -19,6 +19,8 @@ export class Store {
 
   private constructor(project: Project) {
     this.project = project;
+    // doppelte Punkte (Stücke ohne Länge) aus älteren Ständen bereinigen
+    for (const r of project.roads ?? []) cleanPoints(r);
   }
 
   /**

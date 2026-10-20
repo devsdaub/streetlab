@@ -1,7 +1,7 @@
 // Fehlersuche Simulation: Wer steht wie lange an der Haltelinie und warum? Auch mit Kreisverkehr statt Kreuzung.
 // Aufruf: node scripts/sim-diag.mjs [szene] [kreisel]
 import { execSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { scenes } from './scenes.mjs';
 mkdirSync('scripts/.build', { recursive: true });
 execSync('npx --yes esbuild src/render.ts src/network.ts src/sim.ts --bundle --format=esm --platform=node --outdir=scripts/.build --log-level=error', { stdio: 'inherit' });
@@ -9,11 +9,11 @@ const { RoadRenderer } = await import('./.build/render.js');
 const { buildNetwork } = await import('./.build/network.js');
 const { Simulation } = await import('./.build/sim.js');
 
-const names = process.argv[2] ? [process.argv[2]] : ['all', 'style', 'stress', 'assets', 'user'];
+const names = process.argv[2] ? [process.argv[2]] : ['all', 'style', 'stress', 'assets', 'skew', 'fixtures/mein-stadtteil.json'];
 let failed = 0;
 for (const name of names) {
   for (const ring of [false, true]) {
-    const p = structuredClone(scenes[name]);
+    const p = name.endsWith('.json') ? JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8')) : structuredClone(scenes[name]);
     p.junctions ??= {};
     let built = new RoadRenderer().build(p.roads, p.junctions);
     if (ring) {
@@ -34,7 +34,7 @@ for (const name of names) {
       if (i % 10) continue;
       for (const v of sim.vehicles) {
         const t = v.track;
-        const atLine = t.lane && v.exit && v.v < 0.1 && v.exit.at - v.s < 1;
+        const atLine = t.lane && v.exit && v.v < 0.1 && v.exit.stop - v.s < 4;
         if (!atLine) { waitSince.delete(v); continue; }
         const why = sim.blockedBy(v, v.exit.conn, 0) ?? 'frei?';
         reasons[why] = (reasons[why] ?? 0) + 1;

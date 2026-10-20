@@ -56,6 +56,8 @@ export interface ConnDef {
   pts?: Vec[];
   /** aus dem Kreuzungseditor (true) oder automatisch ergänzt */
   explicit: boolean;
+  /** Haltlinie auf der Zufahrtsspur (vor der Querung); fehlt = Beginn des Fahrwegs */
+  stop?: Vec;
 }
 
 export interface Network {
@@ -139,6 +141,11 @@ export function buildNetwork(project: Project, junctionInfo: Map<string, Junctio
     }
   });
 
+  // Knoten, an denen nur zwei Straßenstücke zusammentreffen, sind Übergänge — keine Kreuzung
+  const degree = new Map<string, number>();
+  for (const s of segments) for (const k of [s.start, s.end]) if (k) degree.set(k, (degree.get(k) ?? 0) + 1);
+  for (const n of nodes.values()) if (n.kind === 'junction' && (degree.get(n.key) ?? 0) <= 2) n.kind = 'pass';
+
   // ---- Verbindungen aus dem Kreuzungseditor ----
   const segAt = (key: string, armId: string) => {
     const [roadId, side] = armId.split(':');
@@ -160,7 +167,7 @@ export function buildNetwork(project: Project, junctionInfo: Map<string, Junctio
       const li = eIn?.lanes.find((l) => l.stripId === link.from);
       const lo = eOut?.lanes.find((l) => l.stripId === link.to);
       if (!eIn || !eOut || !li || !lo) continue;
-      conns.push({ from: eIn.id, fromLane: li.index, to: eOut.id, toLane: lo.index, pts: link.pts.map(proj.fwd), explicit: true });
+      conns.push({ from: eIn.id, fromLane: li.index, to: eOut.id, toLane: lo.index, pts: link.pts.map(proj.fwd), explicit: true, stop: inL.stop && proj.fwd(inL.stop) });
     }
   }
 
@@ -188,7 +195,53 @@ export function buildNetwork(project: Project, junctionInfo: Map<string, Junctio
       }
     }
   }
+  rerootShortArms(edges, nodes, conns);
   return { nodes, edges, conns, toLocal: proj.fwd, toLngLat: proj.inv };
+}
+
+/**
+ * Kurze Kreuzungsarme: Liegen Haltlinie oder Kreuzungsrand schon vor dem Anfang der Zufahrtsspur
+ * (Arm kürzer als der Kreuzungsbereich, davor ein Übergang auf eine andere Straße), beginnen die
+ * Fahrwege durch die Kreuzung direkt auf der Spur davor. Das Zwischenstück wird übersprungen.
+ */
+function rerootShortArms(edges: EdgeDef[], nodes: Map<string, NodeDef>, conns: ConnDef[]) {
+  const edgeById = new Map(edges.map((e) => [e.id, e]));
+  const nodeById = new Map([...nodes.values()].map((n) => [n.id, n]));
+  const laneOf = (edge: string, index: number) => edgeById.get(edge)?.lanes.find((l) => l.index === index);
+  /** Abstand eines Punkts vor dem Spuranfang (> 0 = liegt davor) */
+  const before = (shape: Vec[], q: Vec) => {
+    const [a, b] = shape;
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    return -((q[0] - a[0]) * (b[0] - a[0]) + (q[1] - a[1]) * (b[1] - a[1])) / l;
+  };
+  for (let round = 0; round < 3; round++) {
+    let changed = false;
+    for (const c of conns.slice()) {
+      if (!c.explicit || !c.pts) continue;
+      const lane = laneOf(c.from, c.fromLane);
+      const e = edgeById.get(c.from);
+      if (!lane || !e || nodeById.get(e.from)?.kind !== 'pass') continue;
+      const earliest = c.stop ?? c.pts[0];
+      if (before(lane.shape, earliest) < 0.5) continue;
+      // Zubringer über den Übergang auf diese Spur
+      const feeders = conns.filter((f) => !f.explicit && f.to === c.from && f.toLane === c.fromLane);
+      if (!feeders.length) continue;
+      conns.splice(conns.indexOf(c), 1);
+      for (const f of feeders) conns.push({ ...c, from: f.from, fromLane: f.fromLane });
+      changed = true;
+    }
+    // Spuren, die keine Weiterfahrt mehr haben (alles umgeleitet), bekommen keinen Zufluss mehr
+    for (const f of conns.slice()) {
+      if (f.explicit) continue;
+      const hasOut = conns.some((c) => c.from === f.to && c.fromLane === f.toLane);
+      const endsAtJunction = nodeById.get(edgeById.get(f.to)?.to ?? '')?.kind === 'junction';
+      if (!hasOut && endsAtJunction) {
+        conns.splice(conns.indexOf(f), 1);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
 }
 
 /**

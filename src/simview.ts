@@ -10,7 +10,11 @@ import { Simulation, type SimStats, type VehicleKind } from './sim';
 import type { Store } from './store';
 
 const CAR_COLORS = ['#e2e3e4', '#e2e3e4', '#c9ccd0', '#2e3033', '#8e959c', '#9b2c2c', '#2c4a7a', '#f1efe9', '#3d5c3a'];
-const SIGNAL = { green: '#2fbf71', amber: '#f5b82e', red: '#e5383b' } as const;
+/** Gelenkfahrzeuge: Glieder als [Anfang, Ende] in Metern hinter der Front */
+const ARTICULATED: Partial<Record<VehicleKind, [number, number][]>> = {
+  tram: [[0, 10.1], [10.1, 20.3], [20.3, 30]],
+};
+const SIGNAL ={ green: '#2fbf71', amber: '#f5b82e', red: '#e5383b' } as const;
 
 export class SimView {
   sim: Simulation | null = null;
@@ -129,11 +133,27 @@ export class SimView {
     const push = (pts: Vec[], color: string, rank: number) =>
       features.push({ type: 'Feature', properties: { color, rank }, geometry: { type: 'Polygon', coordinates: [pts.map(toLL)] } });
     for (const v of sim.vehicles) {
-      const { p, h } = sim.vehiclePose(v);
-      const n: Vec = [-h[1], h[0]];
+      // Glieder (Abstand von der Front): jedes Glied liegt als Sehne auf dem gefahrenen Weg
+      const parts = ARTICULATED[v.kind] ?? [[0, v.len]];
+      const frames = parts.map(([a, b]) => {
+        const pa = sim.pointBehind(v, a), pb = sim.pointBehind(v, b);
+        const l = Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) || 1;
+        const h: Vec = [(pa[0] - pb[0]) / l, (pa[1] - pb[1]) / l];
+        return { a, pa, h, n: [-h[1], h[0]] as Vec };
+      });
       for (const sh of this.shapesFor(v.kind, v.id)) {
-        // Formen sind auf ihre Mitte bezogen; Länge entlang der Fahrtrichtung
-        push(sh.pts.map(([x, y]) => [p[0] + h[0] * x + n[0] * y, p[1] + h[1] * x + n[1] * y] as Vec), sh.color, (sh.rank ?? 2) + 10);
+        // Formen sind auf die Fahrzeugmitte bezogen (x nach vorn); Glied nach der Lage der Form
+        const cx = sh.pts.reduce((s, q) => s + q[0], 0) / sh.pts.length;
+        const dc = v.len / 2 - cx;
+        const f = frames.find((_, i) => dc <= parts[i][1]) ?? frames[frames.length - 1];
+        push(
+          sh.pts.map(([x, y]) => {
+            const back = v.len / 2 - x - f.a;
+            return [f.pa[0] - f.h[0] * back + f.n[0] * y, f.pa[1] - f.h[1] * back + f.n[1] * y] as Vec;
+          }),
+          sh.color,
+          (sh.rank ?? 2) + 10,
+        );
       }
     }
     // Ampeln: farbiger Punkt an der Haltelinie jeder Zufahrtsspur

@@ -20,3 +20,5 @@ echo "== sim-diag.mjs"; node scripts/sim-diag.mjs 2>&1 | grep -v notice | cut -c
 run sim.mjs 4
 # SUMO-Prüfung nur mit Python-Umgebung (pip install eclipse-sumo): SUMO_VENV=<pfad> bash scripts/all.sh
 if [ -n "$SUMO_VENV" ]; then echo "== sumo-test.mjs"; node scripts/sumo-test.mjs "$SUMO_VENV" "$out" 2>&1 | tail -6; fi
+echo "== roundtrip.mjs"; node scripts/roundtrip.mjs fixtures/mein-stadtteil.json "$out" 2>&1 | grep -v "^ok" | tail -6
+echo "== invariants.mjs"; node scripts/invariants.mjs 20 2>&1 | grep -v notice | sed -n '/Szenen ohne/,$p'

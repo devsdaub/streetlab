@@ -1,9 +1,11 @@
 // Screenshots per Edge (headless): node scripts/shot.mjs <szene> <datei.png> [zoom] [dx dy]
 import { chromium } from 'playwright-core';
+import { readFileSync } from 'node:fs';
 import { scenes, ll } from './scenes.mjs';
 
 const [scene = 'all', out = 'shot.png', zoom, dx, dy] = process.argv.slice(2);
-const project = structuredClone(scenes[scene]);
+// Szene aus scenes.mjs oder eine gespeicherte Projektdatei (.json)
+const project = scene.endsWith('.json') ? JSON.parse(readFileSync(scene, 'utf8')) : structuredClone(scenes[scene]);
 if (process.env.BASEMAP) project.basemap = process.env.BASEMAP;
 if (zoom) project.view = { center: ll(+dx || 0, +dy || 0), zoom: +zoom };
 

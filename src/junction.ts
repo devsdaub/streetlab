@@ -105,7 +105,7 @@ export type Move = 'left' | 'straight' | 'right';
 export interface JunctionInfo {
   arms: { armId: string; roadId: string; ang: number }[];
   /** Fahrstreifen-Enden am Kreuzungsrand (bike = Radstreifen) */
-  lanes: { id: string; armId: string; kind: 'in' | 'out'; bike: boolean; pos: LngLat }[];
+  lanes: { id: string; armId: string; kind: 'in' | 'out'; bike: boolean; pos: LngLat; stop?: LngLat }[];
   links: { from: string; to: string; move: Move; bike: boolean; pts: LngLat[] }[];
 }
 
@@ -138,10 +138,17 @@ function makeArm(input: ArmInput, toLocal: (p: LngLat) => Vec): Arm | null {
   if (!input.atStart) {
     strips = strips.reverse().map((s) => ({ ...s, l: -s.r, r: -s.l, dir: -s.dir as 1 | -1 }));
   }
-  const cwIdx = strips.map((s, i) => (STRIP_TYPES[s.type].carriageway ? i : -1)).filter((i) => i >= 0);
+  // Fahrbahn = Fahrstreifen samt direkt anliegender Rad- und Parkstreifen. Ein Radweg hinter
+  // Gehweg oder Grün (Hochbordradweg) ist Seitenraum und läuft mit um die Ecke.
+  const core = strips.map((s, i) => (s.type === 'drive' || s.type === 'bus' || s.type === 'tram' ? i : -1)).filter((i) => i >= 0);
+  const cwIdx = core.length ? core : strips.map((s, i) => (STRIP_TYPES[s.type].carriageway ? i : -1)).filter((i) => i >= 0);
   const hasCw = cwIdx.length > 0;
-  const first = hasCw ? cwIdx[0] : 0;
-  const last = hasCw ? cwIdx[cwIdx.length - 1] : strips.length - 1;
+  let first = hasCw ? cwIdx[0] : 0;
+  let last = hasCw ? cwIdx[cwIdx.length - 1] : strips.length - 1;
+  if (core.length) {
+    while (first > 0 && STRIP_TYPES[strips[first - 1].type].carriageway) first--;
+    while (last < strips.length - 1 && STRIP_TYPES[strips[last + 1].type].carriageway) last++;
+  }
 
   return {
     ...input,
@@ -169,6 +176,21 @@ function arcPoints(c: Vec, r: number, a0: number, sweep: number, r1 = r): Vec[] 
     out.push([c[0] + rr * Math.cos(w), c[1] + rr * Math.sin(w)]);
   }
   return out;
+}
+
+/** Bogenlänge des Fußpunkts von p auf der (gekrümmten) Armlinie */
+function projS(x: { local: Vec[] }, p: Vec): number {
+  let best = 0, bd = Infinity, acc = 0;
+  for (let i = 1; i < x.local.length; i++) {
+    const a = x.local[i - 1], b = x.local[i];
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const l2 = dx * dx + dy * dy || 1;
+    const u = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2));
+    const d = Math.hypot(a[0] + dx * u - p[0], a[1] + dy * u - p[1]);
+    if (d < bd) [bd, best] = [d, acc + u * Math.sqrt(l2)];
+    acc += Math.sqrt(l2);
+  }
+  return best;
 }
 
 const shortSweep = (a0: number, a1: number) => {
@@ -302,6 +324,11 @@ export function buildJunction(
     if (roundabout) a.trim = Math.max(a.trim, R + 1);
     a.trim = Math.min(a.trim, Math.max(0, a.len - 0.3), a.maxTrim ?? Infinity, ARM_LOOKAHEAD - 1);
   }
+  /**
+   * Bis wohin (Bogenlänge ab Knoten) dieser Knoten Elemente auf einen Arm setzen darf: Liegt am
+   * anderen Ende ein weiterer Knoten, gehört jedem die Hälfte. Was nicht passt, wird verkürzt oder entfällt.
+   */
+  const reach = (x: Arm) => Math.min(x.len, x.both ? (x.length ?? x.len) / 2 : x.length ?? x.len);
 
   // 2. Flächen
   const ends = new Map(
@@ -321,24 +348,36 @@ export function buildJunction(
     const r = dedupe(pts, 0.01).map(proj.inv);
     return [...r, r[0]];
   };
-  const push = (to: Feature<Polygon>[], pts: Vec[], color: string, rank = 0) =>
-    to.push({ type: 'Feature', properties: { node: key, color, rank }, geometry: { type: 'Polygon', coordinates: [ring(pts)] } });
+  /** kind: Art des Elements (für Prüfungen und Auswahl), z. B. zebra, stopline, arrow, sign, asphalt oder Streifentyp */
+  const push = (to: Feature<Polygon>[], pts: Vec[], color: string, rank = 0, kind?: string) =>
+    to.push({ type: 'Feature', properties: { node: key, color, rank, ...(kind ? { kind } : {}) }, geometry: { type: 'Polygon', coordinates: [ring(pts)] } });
   const anyCw = arms.some((a) => a.hasCw);
 
   const asphalt: Vec[] = [];
-  for (const c of corners) asphalt.push(at(c.a, c.a.cR), at(c.a, c.a.cL), ...c.bounds[0].mid);
-  push(res.surfaces, asphalt, anyCw ? STRIP_TYPES.drive.color : STRIP_TYPES.sidewalk.color, 5);
+  /** Ausrundung auf den tatsächlichen Rückschnitt begrenzen: Punkte jenseits davon würden die Ecke falten */
+  const clip = (c: Corner, mid: Vec[]) => mid.filter((p) => projS(c.a, p) <= c.a.trim + 0.01 && projS(c.b, p) <= c.b.trim + 0.01);
+  for (const c of corners) asphalt.push(at(c.a, c.a.cR), at(c.a, c.a.cL), ...clip(c, c.bounds[0].mid));
+  push(res.surfaces, asphalt, anyCw ? STRIP_TYPES.drive.color : STRIP_TYPES.sidewalk.color, 5, anyCw ? 'asphalt' : 'sidewalk');
 
   for (const c of corners) {
-    const paths = c.bounds.map((bd) => [at(c.a, bd.offA), ...bd.mid, at(c.b, bd.offB)]);
+    const paths = c.bounds.map((bd) => [at(c.a, bd.offA), ...clip(c, bd.mid), at(c.b, bd.offB)]);
     c.types.forEach((type, k) => {
       const color = type === 'median' ? STRIP_TYPES.sidewalk.color : STRIP_TYPES[type].color;
-      push(res.surfaces, [...paths[k], ...paths[k + 1].slice().reverse()], color, STRIP_TYPES[type].rank);
+      push(res.surfaces, [...paths[k], ...paths[k + 1].slice().reverse()], color, STRIP_TYPES[type].rank, type === 'median' ? 'sidewalk' : type);
     });
     if (c.types.length && anyCw) {
       for (const poly of linePolygons(dedupe(paths[0], 0.01), 0.2)) push(res.markings, poly, CURB);
     }
   }
+
+  /** Fahrbahnteiler je Arm (Querversatz): Markierungen werden dort unterbrochen, er dient als Querungsinsel */
+  const splitOf = new Map<Arm, { lo: number; hi: number }>();
+  /** Querintervall [lo, hi] ohne den Fahrbahnteiler des Arms */
+  const outsideSplit = (x: Arm, lo: number, hi: number): [number, number][] => {
+    const g = splitOf.get(x);
+    if (!g || g.hi <= lo || g.lo >= hi) return [[lo, hi]];
+    return ([[lo, g.lo], [g.hi, hi]] as [number, number][]).filter(([p, q]) => q - p > 0.3);
+  };
 
   // 3. Kreisverkehr: überfahrbarer Innenring, bepflanzte Mittelinsel, Fahrbahnteiler
   if (roundabout) {
@@ -348,14 +387,14 @@ export function buildJunction(
     if (mini) {
       // überfahrbare, aufgemalte Mittelinsel
       const r = Math.max(1.5, apron);
-      push(res.surfaces, circle([0, 0], r, 48), '#e9e4d8', 6);
+      push(res.surfaces, circle([0, 0], r, 48), '#e9e4d8', 6, 'island');
       for (const poly of linePolygons(circle([0, 0], r, 48), 0.2)) push(res.markings, poly, WHITE);
     } else if (apron > 1) {
-      push(res.surfaces, circle([0, 0], apron, 64), STRIP_TYPES.sidewalk.color, 6);
+      push(res.surfaces, circle([0, 0], apron, 64), STRIP_TYPES.sidewalk.color, 6, 'island');
       for (const poly of linePolygons(circle([0, 0], apron + 0.25, 64), 0.12)) push(res.markings, poly, ringLine);
     }
     if (island > 1) {
-      push(res.surfaces, circle([0, 0], island, 64), STRIP_TYPES.green.color, 7);
+      push(res.surfaces, circle([0, 0], island, 64), STRIP_TYPES.green.color, 7, 'green');
       const rnd = rand(key);
       const pushDecor = (pts: Vec[], color: string, rank: number) => push(res.decor, pts, color, rank);
       const big = Math.min(3.5, island * 0.45);
@@ -379,8 +418,8 @@ export function buildJunction(
       const split = lanes.findIndex((s, i) => i > 0 && s.dir !== lanes[i - 1].dir);
       if (split < 0) continue;
       const o = lanes[split].l;
-      const s0 = a.trim - 1.5, s1 = a.trim + (crossingOf(a) !== 'none' ? 13 : 9);
-      if (s0 < 0) continue;
+      const s0 = a.trim - 1.5, s1 = Math.min(a.trim + (crossingOf(a) !== 'none' ? 13 : 9), reach(a) - 0.5);
+      if (s0 < 0 || s1 - a.trim < 4) continue;
       const wedge: Vec[] = [];
       const steps = 8;
       for (let i = 0; i <= steps; i++) {
@@ -391,19 +430,30 @@ export function buildJunction(
         const s = s0 + ((s1 - s0) * i) / steps;
         wedge.push(atS(a, s, o - 0.95 + (0.7 * i) / steps));
       }
-      push(res.surfaces, wedge, STRIP_TYPES.sidewalk.color, 8);
+      push(res.surfaces, wedge, STRIP_TYPES.sidewalk.color, 8, 'island');
+      splitOf.set(a, { lo: o - 1.1, hi: o + 1.1 });
       for (const poly of linePolygons([...wedge, wedge[0]], 0.12)) push(res.markings, poly, ringLine);
     }
   }
 
   /** Form in Zufahrtsrichtung an Position s / Querversatz off setzen (x zeigt zum Knoten) */
-  const place = (x: Arm, s: number, off: number, shape: Shape[], to: Feature<Polygon>[]) => {
+  const place = (x: Arm, s: number, off: number, shape: Shape[], to: Feature<Polygon>[], kind?: string) => {
     const { p, t } = pointAt(x.local, s);
     const n = leftNormal(t);
     const c = add(p, mul(n, off));
     for (const sh of shape) {
-      push(to, sh.pts.map(([u, v]) => add(add(c, mul(t, -u)), mul(n, -v))), sh.color, sh.rank ?? 0);
+      push(to, sh.pts.map(([u, v]) => add(add(c, mul(t, -u)), mul(n, -v))), sh.color, sh.rank ?? 0, kind);
     }
+  };
+
+  /** Querversatz für Schilder und Ampeln: auf dem Gehweg bzw. Grünstreifen rechts der Zufahrt */
+  const signOffset = (x: Arm) => {
+    let edge = x.cL;
+    for (const s of x.left) {
+      if (s.type === 'sidewalk' || s.type === 'green' || s.type === 'median') return Math.min((s.l + s.r) / 2, s.r + 1);
+      edge = s.l;
+    }
+    return edge + 0.8;
   };
 
   // 4. Querungen je Arm
@@ -418,7 +468,7 @@ export function buildJunction(
         if (cur) cur.lo = s.r;
         else cur = { hi: s.l, lo: s.r };
       } else if (cur && STRIP_TYPES[s.type].carriageway && s.type !== 'parking') {
-        cur.lo = s.r; // Radstreifen zwischen Fahrstreifen bleiben Teil der Querung
+        cur.lo = s.r; // Radstreifen auf der Fahrbahn gehören zur Querung (abgesetzte Radwege sind Seitenraum)
       } else if (cur) {
         out.push(cur);
         cur = null;
@@ -434,7 +484,9 @@ export function buildJunction(
     let lineAt = a.trim + 0.3;
     // Fußgängerquerung nur über die Fahrstreifen — Radwege bekommen ihre eigene Furt
     const driven = a.strips.filter((s) => s.type === 'drive' || s.type === 'bus' || s.type === 'tram');
-    const crossing = inner(a) ? 'none' : crossingOf(a);
+    // Querung nur, wenn sie samt Haltlinie in den eigenen Teil des Arms passt
+    const fits = a.trim + (roundabout ? 4 : 1) + CROSSING_LEN + 1.5 <= reach(a);
+    const crossing = inner(a) || !fits ? 'none' : crossingOf(a);
     if (crossing !== 'none' && driven.length) {
       const [hi, lo] = [driven[0].l, driven[driven.length - 1].r];
       const s0 = a.trim + (roundabout ? 4 : 1);
@@ -445,14 +497,33 @@ export function buildJunction(
         const at2 = (u: number, o: number) => add(add(p, mul(t, u)), mul(n, o));
         const half = CROSSING_LEN / 2;
         for (const g of drivenGroups(a)) {
-          for (let o = g.lo + 0.3; o + 0.5 <= g.hi - 0.2; o += 1) {
-            push(res.markings, [at2(-half, o), at2(half, o), at2(half, o + 0.5), at2(-half, o + 0.5)], WHITE);
-          }
+          for (const [glo, ghi] of outsideSplit(a, g.lo, g.hi))
+            for (let o = glo + 0.3; o + 0.5 <= ghi - 0.2; o += 1) {
+              push(res.markings, [at2(-half, o), at2(half, o), at2(half, o + 0.5), at2(-half, o + 0.5)], WHITE, 0, 'zebra');
+            }
         }
       } else {
-        for (const s of [s0, s0 + CROSSING_LEN]) {
-          for (const poly of linePolygons([atS(a, s, lo), atS(a, s, hi)], 0.25, [0.5, 0.3])) push(res.markings, poly, WHITE);
-        }
+        for (const s of [s0, s0 + CROSSING_LEN])
+          for (const [p, q] of outsideSplit(a, lo, hi))
+            for (const poly of linePolygons([atS(a, s, p), atS(a, s, q)], 0.25, [0.5, 0.3])) push(res.markings, poly, WHITE, 0, 'crossing');
+      }
+      // Grünstreifen und Mittelinseln im Querungsbereich gepflastert, damit der Weg nicht im Beet endet
+      {
+        const { p, t } = pointAt(a.local, s0 + CROSSING_LEN / 2);
+        const n = leftNormal(t);
+        const at2 = (u: number, o: number) => add(add(p, mul(t, u)), mul(n, o));
+        const half = CROSSING_LEN / 2 + 0.3;
+        const pave = (s: ArmStrip) => {
+          push(res.surfaces, [at2(-half, s.r), at2(half, s.r), at2(half, s.l), at2(-half, s.l)], STRIP_TYPES.sidewalk.color, 8, 'sidewalk');
+          for (const u of [-half, half]) for (const poly of linePolygons([at2(u, s.r), at2(u, s.l)], 0.15)) push(res.markings, poly, CURB);
+        };
+        const planted = (s: ArmStrip) => s.type === 'green' || s.type === 'median';
+        for (const side of [a.left, a.right])
+          for (const s of side) {
+            if (s.type === 'sidewalk') break;
+            if (planted(s)) pave(s);
+          }
+        for (const s of a.strips) if (planted(s) && s.r >= a.cR - 0.01 && s.l <= a.cL + 0.01) pave(s);
       }
       // Haltlinie hinter der Querung; im Kreisverkehr bleibt die Wartelinie am Ring
       if (!roundabout) lineAt = s0 + CROSSING_LEN + 1;
@@ -461,6 +532,7 @@ export function buildJunction(
     lineAtOf.set(a, lineAt);
     // Abbiegepfeile brauchen Platz vor der Haltlinie: Leitlinien dort aussparen
     if (!roundabout && arms.length >= 3) keepOut = Math.max(keepOut, lineAt - a.trim + 9);
+    keepOut = Math.min(keepOut, Math.max(0.5, reach(a) - a.trim));
     keepOutOf.set(a, keepOut);
     // Mittelinsel zwischen den Fahrtrichtungen läuft bei einer Querung als Fußgänger-Insel bis an den Knoten
     const hasMedian = a.strips.some((x, i) => x.type === 'median' && i > 0 && i < a.strips.length - 1);
@@ -469,7 +541,7 @@ export function buildJunction(
     // Zeichen 350 vor Zebrastreifen, rechts in Zufahrtsrichtung
     if (crossing === 'zebra' && driven.length) {
       const sSign = a.trim + (roundabout ? 4 : 1) + CROSSING_LEN + 5.5;
-      if (sSign < a.len - 2) place(a, sSign, a.cL + 1.1, zebraSign(), res.decor);
+      if (sSign < reach(a) - 1) place(a, sSign, signOffset(a), zebraSign(), res.decor, 'sign');
     }
   }
 
@@ -555,7 +627,10 @@ export function buildJunction(
   if (!roundabout && arms.length >= 3) {
     for (const x of arms) {
       for (const bike of [false, true]) {
-        for (const l of inLanes(x, bike)) res.info.lanes.push({ id: l.id, armId: x.armId, kind: 'in', bike, pos: proj.inv(laneEnd(x, l).p) });
+        // Haltlinie (vor der Querung) — dort warten Fahrzeuge in der Simulation
+        const stopS = bike ? x.trim + 0.5 : lineAtOf.get(x)!;
+        for (const l of inLanes(x, bike))
+          res.info.lanes.push({ id: l.id, armId: x.armId, kind: 'in', bike, pos: proj.inv(laneEnd(x, l).p), stop: proj.inv(atS(x, stopS, (l.l + l.r) / 2)) });
         for (const l of outLanes(x, bike)) res.info.lanes.push({ id: l.id, armId: x.armId, kind: 'out', bike, pos: proj.inv(laneEnd(x, l).p) });
       }
     }
@@ -568,7 +643,7 @@ export function buildJunction(
       // Radfurt entlang der Verbindung: grünes Band mit unterbrochenen Rändern
       if (!st.bikeCrossing) continue;
       const w = Math.min(k.inL.l - k.inL.r, k.outL.l - k.outL.r);
-      push(res.surfaces, band(pts, w / 2, -w / 2), STRIP_TYPES.bike.color, 6);
+      push(res.surfaces, band(pts, w / 2, -w / 2), STRIP_TYPES.bike.color, 6, 'bike');
       for (const side of [w / 2, -w / 2]) {
         for (const poly of linePolygons(offsetPolyline(pts, side), 0.25, [0.5, 0.5])) push(res.markings, poly, WHITE);
       }
@@ -607,7 +682,7 @@ export function buildJunction(
             v * v * v * A.p[1] + 3 * v * v * u * p1[1] + 3 * v * u * u * p2[1] + u * u * u * B.p[1],
           ] as Vec;
         });
-        push(res.surfaces, band(pts, 1.3, -1.3), STRIP_TYPES.tram.color, 6);
+        push(res.surfaces, band(pts, 1.3, -1.3), STRIP_TYPES.tram.color, 6, 'tram');
         for (const o of [-0.7175, 0.7175]) {
           for (const poly of linePolygons(offsetPolyline(pts, o), 0.14)) push(res.markings, poly, '#696967');
         }
@@ -647,12 +722,13 @@ export function buildJunction(
 
     if (roundabout) {
       for (const g of groups) {
-        const [l, r] = [g[0].l, g[g.length - 1].r];
-        if (style === 'us') place(x, lineAt, 0, sharkTeeth(r, l), res.markings);
-        else for (const poly of linePolygons([atS(x, lineAt, r), atS(x, lineAt, l)], 0.3, [0.5, 0.25])) push(res.markings, poly, WHITE);
+        for (const [r, l] of outsideSplit(x, g[g.length - 1].r, g[0].l)) {
+          if (style === 'us') place(x, lineAt, 0, sharkTeeth(r, l), res.markings, 'stopline');
+          else for (const poly of linePolygons([atS(x, lineAt, r), atS(x, lineAt, l)], 0.3, [0.5, 0.25])) push(res.markings, poly, WHITE, 0, 'stopline');
+        }
         // Kreisverkehrspfeil hinter Querung und Fahrbahnteiler
         const sArrow = x.trim + Math.max(keepOutOf.get(x)!, mini ? 2 : 11) + 7;
-        for (const lane of g.filter(isLane)) if (sArrow < x.len - 3) place(x, sArrow, (lane.l + lane.r) / 2, fitToLane(roundaboutArrow(), lane.l - lane.r), res.markings);
+        for (const lane of g.filter(isLane)) if (sArrow < reach(x) - 3) place(x, sArrow, (lane.l + lane.r) / 2, fitToLane(roundaboutArrow(), lane.l - lane.r), res.markings, 'arrow');
       }
       continue;
     }
@@ -662,10 +738,10 @@ export function buildJunction(
     for (const g of groups) {
       const [l, r] = [g[0].l, g[g.length - 1].r];
       if (role === 'yield') {
-        if (style === 'us') place(x, lineAt, 0, sharkTeeth(r, l), res.markings);
-        else for (const poly of linePolygons([atS(x, lineAt + 0.25, r), atS(x, lineAt + 0.25, l)], 0.5, [0.5, 0.25])) push(res.markings, poly, WHITE);
+        if (style === 'us') place(x, lineAt, 0, sharkTeeth(r, l), res.markings, 'stopline');
+        else for (const poly of linePolygons([atS(x, lineAt + 0.25, r), atS(x, lineAt + 0.25, l)], 0.5, [0.5, 0.25])) push(res.markings, poly, WHITE, 0, 'stopline');
       } else if ((control === 'stoplines' || control === 'signals' || role === 'stop') && line.length >= 2) {
-        push(res.markings, band(line, l, r), WHITE);
+        push(res.markings, band(line, l, r), WHITE, 0, 'stopline');
       }
     }
     // Abbiegepfeile aus den Spurverbindungen
@@ -679,12 +755,13 @@ export function buildJunction(
       for (const back of [5.5, 26]) {
         const sPos = lineAt + back;
         // nur dort, wo die Spur ihre volle Breite hat (nicht in einer Verziehung)
-        if (sPos < Math.min(x.len - 4, (x.uniform ?? Infinity) - 3)) place(x, sPos, (lane.l + lane.r) / 2, fitToLane(turnArrow(turn), lane.l - lane.r), res.markings);
+        // der erste Pfeil passt immer: Verziehungen werden hinter den Kreuzungsbereich geschoben
+        if (sPos < Math.min(reach(x) - 4, back < 10 ? Infinity : (x.uniform ?? Infinity) - 3)) place(x, sPos, (lane.l + lane.r) / 2, fitToLane(turnArrow(turn), lane.l - lane.r), res.markings, 'arrow');
       }
     }
     // Schilder bzw. Ampel am rechten Fahrbahnrand der Zufahrt
     const signs = control === 'signals' ? trafficLight() : role === 'main' ? mainSign() : role === 'yield' ? yieldSign() : role === 'stop' ? stopSign() : null;
-    if (signs) place(x, lineAt + 0.6, x.cL + 1.1, signs, res.decor);
+    if (signs) place(x, lineAt + 0.6, signOffset(x), signs, res.decor, 'sign');
   }
 
   return res;
