@@ -253,3 +253,7 @@ details.group[open] summary .ico { transform: none; }
 .profile-preview svg { width: 100%; height: 100%; display: block; }
 
 code { font: 11px/1.4 ui-monospace, Consolas, monospace; padding: 1px 5px; border-radius: 4px; background: var(--surface-2); color: var(--text); }
+
+.sim-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; padding: 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); font-size: 12px; }
+.sim-stats div { display: flex; flex-direction: column; gap: 1px; }
+.sim-stats b { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }

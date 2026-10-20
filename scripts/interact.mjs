@@ -55,7 +55,7 @@ await page.waitForTimeout(3000);
 await page.screenshot({ path: `${out}/ui-3-dop.png` });
 await page.click('details[data-fold=export] summary');
 await page.click('[data-action=export-scale] button[data-value="4"]');
-console.log('Export-Info:', await page.locator('.group', { hasText: 'Export' }).locator('p.muted').textContent());
+console.log('Export-Info:', await page.locator('.group', { hasText: 'Export' }).locator('p.muted').first().textContent());
 const [png] = await Promise.all([page.waitForEvent('download', { timeout: 150000 }), page.click('[data-action=export-png]')]);
 await png.saveAs(`${out}/export-4x.png`);
 const [svg] = await Promise.all([page.waitForEvent('download'), page.click('[data-action=export-svg]')]);

@@ -91,4 +91,15 @@ scenes.assets = {
     road('sued', [[120, 0], [125, -40], [150, -70]], [S('sidewalk', 3), S('drive', 3.25, -1), S('tram', 3.2, -1), S('tram', 3.2, 1), S('drive', 3.25, 1), S('sidewalk', 3)]),
   ],
 };
+// Schiefe Ampelkreuzung wie im Nutzer-Screenshot: Radwege außen, Grünstreifen, Abbiegespur
+scenes.skew = {
+  version: 1, name: 'Schiefe Kreuzung', view: { center: ll(0, 0), zoom: 19.2 },
+  junctions: { [key(ll(0, 0))]: { kind: 'cross', radius: 8, crossing: 'zebra', bikeCrossing: true, stopLines: true, control: 'signals', rbRadius: 15, rbLane: 6.5 } },
+  roads: [
+    road('nw', [[0, 0], pol(0, 0, 70, 145)], [S('bike', 2, 1), S('sidewalk', 2.5), S('drive', 3.25, 1), S('drive', 3.25, -1), S('sidewalk', 2.5)]),
+    road('ne', [[0, 0], pol(0, 0, 70, 42)], [S('drive', 3.25, -1), S('drive', 3.25, 1), T('green', 2.5, 1, 'trees'), S('bike', 2, 1)]),
+    road('se', [[0, 0], pol(0, 0, 70, -32)], [S('bike', 2, 1), { ...S('drive', 3.25, -1), turn: 'left' }, S('drive', 3.25, -1), S('drive', 3.25, 1), S('sidewalk', 2.5)]),
+    road('s', [[0, 0], pol(0, 0, 70, -112)], [S('drive', 3.25, -1), S('drive', 3.25, 1), S('bike', 2, 1)]),
+  ],
+};
 export { ll };

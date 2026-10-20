@@ -44,6 +44,9 @@ const PATHS: Record<string, string> = {
   folder: 'M2.5 4.5h4l1.5 1.5h5.5v7.5h-11z',
   image: 'M2.5 3.5h11v9h-11zM2.5 10.5l3-3 3 3 2-2 2.5 2.5M10.5 6a.5.5 0 110 .01',
   layers: 'M8 2.5l5.5 3L8 8.5l-5.5-3zM2.5 8L8 11l5.5-3M2.5 10.5L8 13.5l5.5-3',
+  play: 'M5 3.5v9l7.5-4.5z',
+  pause: 'M5.5 3.5v9M10.5 3.5v9',
+  stop: 'M4.5 4.5h7v7h-7z',
 };
 
 export function icon(name: keyof typeof PATHS | string, size = 16): SVGSVGElement {

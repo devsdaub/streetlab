@@ -3,11 +3,14 @@ import type { Map as MapLibre } from 'maplibre-gl';
 import type { Editor, Mode } from './editor';
 import { PRESETS, presetProfile } from './model';
 import { presetPicker, profileSvg } from './presets';
+import type { SimView } from './simview';
 import type { Store } from './store';
 import { h, icon } from './ui';
 
 export class Toolbar {
   private drawPreset = 0;
+  /** Verkehrssimulation (gesetzt von main) */
+  sim: SimView | null = null;
   /** Andock-Bereich oben links (gesetzt von main) */
   dock: { show: (el: HTMLElement) => void; close: () => void } = { show: () => {}, close: () => {} };
 
@@ -91,6 +94,22 @@ export class Toolbar {
           h('button', { class: 'tool', title: 'Rückgängig (Strg+Z)', onclick: () => this.store.undo() }, icon('undo', 18)),
           h('button', { class: 'tool', title: 'Wiederholen (Strg+Y)', onclick: () => this.store.redo() }, icon('redo', 18)),
         ),
+        this.sim
+          ? h(
+              'div',
+              { class: 'tools' },
+              h(
+                'button',
+                {
+                  class: 'tool' + (this.sim.running ? ' on' : ''),
+                  title: this.sim.running ? 'Simulation anhalten (Leertaste)' : 'Simulation starten (Leertaste)',
+                  'data-action': 'sim-play',
+                  onclick: () => (this.sim!.running ? this.sim!.pause() : this.sim!.start()),
+                },
+                icon(this.sim.running ? 'pause' : 'play', 18),
+              ),
+            )
+          : null,
         h(
           'form',
           { class: 'search', onsubmit: search },

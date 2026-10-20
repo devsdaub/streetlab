@@ -43,6 +43,8 @@ export interface NodeDef {
   kind: 'junction' | 'pass' | 'end';
   control: Control;
   junctionKind: JunctionKind;
+  /** Kreisverkehr: Radius der Mittellinie der Kreisfahrbahn (m) */
+  ring?: number;
 }
 
 export interface ConnDef {
@@ -81,6 +83,7 @@ export function buildNetwork(project: Project, junctionInfo: Map<string, Junctio
       const st = { ...defaultJunction(), ...project.junctions?.[key] };
       const kind = key.startsWith('end:') ? 'end' : key.startsWith('sec:') ? 'pass' : 'junction';
       n = { id: `n${nodes.size}`, key, pos: proj.fwd(at), kind, control: controlOf(st), junctionKind: st.kind };
+      if (kind === 'junction' && st.kind !== 'cross') n.ring = st.rbRadius - st.rbLane / 2;
       nodes.set(key, n);
     }
     return n;
@@ -174,13 +177,60 @@ export function buildNetwork(project: Project, junctionInfo: Map<string, Junctio
           li.forEach((l, i) => {
             const j = Math.min(lo.length - 1, Math.round((i * (lo.length - 1)) / Math.max(1, li.length - 1)));
             const p0 = l.shape[l.shape.length - 1], p1 = lo[j].shape[0];
-            conns.push({ from: ei.id, fromLane: l.index, to: eo.id, toLane: lo[j].index, pts: [p0, p1], explicit: false });
+            // Kreisverkehr: Straßenbahn quert die Insel, alle anderen fahren auf der Kreisfahrbahn
+            const ring =
+              n.junctionKind !== 'cross' && n.kind === 'junction' && cls !== 'tram'
+                ? ringPath(n, l.shape, lo[j].shape, project.junctions?.[n.key])
+                : null;
+            conns.push({ from: ei.id, fromLane: l.index, to: eo.id, toLane: lo[j].index, pts: ring ?? [p0, p1], explicit: !!ring });
           });
         }
       }
     }
   }
   return { nodes, edges, conns, toLocal: proj.fwd, toLngLat: proj.inv };
+}
+
+/**
+ * Fahrweg im Kreisverkehr: von der Zufahrt auf die Kreisfahrbahn, gegen den Uhrzeigersinn
+ * (Rechtsverkehr) bis zur Ausfahrt. Liegt auf der Mitte der Kreisfahrbahn.
+ */
+function ringPath(n: NodeDef, inShape: Vec[], outShape: Vec[], st?: { rbRadius?: number; rbLane?: number }): Vec[] {
+  const def = defaultJunction();
+  const outer = st?.rbRadius ?? def.rbRadius;
+  const R = outer - (st?.rbLane ?? def.rbLane) / 2;
+  const [cx, cy] = n.pos;
+  // Spuren laufen bis zur Knotenmitte: Ein- und Ausfahrpunkt am äußeren Rand der Kreisfahrbahn
+  const p0 = edgePoint(inShape.slice().reverse(), n.pos, outer + 1.5);
+  const p1 = edgePoint(outShape, n.pos, outer + 1.5);
+  const a0 = Math.atan2(p0[1] - cy, p0[0] - cx);
+  let a1 = Math.atan2(p1[1] - cy, p1[0] - cx);
+  while (a1 <= a0 + 0.2) a1 += 2 * Math.PI; // gegen den Uhrzeigersinn, mindestens ein Stück
+  const steps = Math.max(4, Math.ceil(((a1 - a0) * R) / 2));
+  const arc: Vec[] = [];
+  for (let k = 0; k <= steps; k++) {
+    const a = a0 + ((a1 - a0) * k) / steps;
+    arc.push([cx + R * Math.cos(a), cy + R * Math.sin(a)]);
+  }
+  return [p0, ...arc, p1];
+}
+
+/** Erster Punkt entlang der Linie (vom Knoten weg), der mindestens r von c entfernt ist */
+function edgePoint(fromNode: Vec[], c: Vec, r: number): Vec {
+  const d = (p: Vec) => Math.hypot(p[0] - c[0], p[1] - c[1]);
+  for (let i = 1; i < fromNode.length; i++) {
+    const a = fromNode[i - 1], b = fromNode[i];
+    if (d(b) < r) continue;
+    // auf der Strecke a–b den Übergang suchen
+    let lo = 0, hi = 1;
+    for (let k = 0; k < 20; k++) {
+      const m = (lo + hi) / 2;
+      if (d([a[0] + (b[0] - a[0]) * m, a[1] + (b[1] - a[1]) * m]) < r) lo = m;
+      else hi = m;
+    }
+    return [a[0] + (b[0] - a[0]) * hi, a[1] + (b[1] - a[1]) * hi];
+  }
+  return fromNode[fromNode.length - 1];
 }
 
 export { nodeKey };

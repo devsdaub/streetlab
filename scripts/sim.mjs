@@ -1,0 +1,32 @@
+// Bedien-Test Simulation im Browser: Start über die Werkzeugleiste, Zeitraffer, Kennzahlen, Änderung während der Simulation.
+import { chromium } from 'playwright-core';
+import { scenes, ll } from './scenes.mjs';
+const out = process.argv[2];
+const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+page.on('pageerror', (e) => console.error('PAGEERROR', e.message));
+const p = structuredClone(scenes.stress); p.basemap = 'none'; p.view = { center: ll(150, -10), zoom: 18.6 };
+await page.addInitScript((p) => localStorage.setItem('streetlab.project.v1', JSON.stringify(p)), p);
+await page.goto('http://localhost:5180/');
+await page.waitForFunction(() => window.__streetlab?.sim);
+await page.waitForTimeout(1200);
+await page.click('[data-action=sim-play]');
+await page.click('[data-action=sim-speed] button[data-value="10"]');
+const fps = await page.evaluate(() => new Promise((res) => { let n = 0; const t0 = performance.now(); const f = () => { n++; if (performance.now() - t0 < 3000) requestAnimationFrame(f); else res(n / 3); }; requestAnimationFrame(f); }));
+await page.waitForTimeout(3000);
+const st = await page.evaluate(() => window.__streetlab.sim.sim.stats());
+const drawn = await page.evaluate(() => window.__streetlab.map.querySourceFeatures('sim').length);
+console.log(`nach ${st.time.toFixed(0)} s: ${st.vehicles} Fahrzeuge, ${st.arrived} angekommen, ⌀ ${(st.meanSpeed * 3.6).toFixed(0)} km/h, ${drawn} Formen gezeichnet, ${fps.toFixed(0)} Bilder/s`);
+console.log('Kennzahlen in der Seitenleiste:', (await page.locator('#sim-stats').innerText()).replace(/\n/g, ' '));
+await page.screenshot({ path: `${out}/sim-run.png` });
+// Änderung während der Simulation: Regelung der Kreuzung auf Kreisverkehr
+const t1 = st.time;
+await page.evaluate(() => { const s = window.__streetlab.store; const k = Object.keys(s.project.junctions)[0]; s.checkpoint(); s.project.junctions[k].kind = 'roundabout'; s.changed('structure'); });
+await page.waitForTimeout(3000);
+const st2 = await page.evaluate(() => window.__streetlab.sim.sim.stats());
+console.log(`nach Umbau zum Kreisverkehr: Simulation läuft weiter (${t1.toFixed(0)} → ${st2.time.toFixed(0)} s), ${st2.vehicles} Fahrzeuge`);
+await page.screenshot({ path: `${out}/sim-roundabout.png` });
+await page.keyboard.press(' ');
+await page.waitForTimeout(300);
+console.log('Leertaste pausiert:', await page.evaluate(() => !window.__streetlab.sim.running));
+await browser.close();

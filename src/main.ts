@@ -4,6 +4,7 @@ import { Editor } from './editor';
 import { EMPTY, createMap, setChunked, setData, type Basemap } from './map';
 import { MapEditor } from './mapedit';
 import { Panel } from './panel';
+import { SimView } from './simview';
 import { Toolbar } from './toolbar';
 import { RoadRenderer, nodeKey, type Built } from './render';
 import type { Road } from './model';
@@ -36,6 +37,13 @@ map.on('load', () => {
   const toolbar = new Toolbar(document.getElementById('toolbar')!, map, store, editor);
   panel.onRender = () => toolbar.render();
   panel.dock = toolbar.dock = mapEditor;
+  // Verkehrssimulation
+  const simView = new SimView(map, store, () => built);
+  panel.sim = toolbar.sim = simView;
+  simView.onChange = () => panel.render();
+  simView.onStats = (s) => panel.showStats(s);
+  if (import.meta.env.DEV) (window as any).__streetlab.sim = simView;
+  panel.render(); // zeigt Simulationsbereich und Start-Knopf
 
   // höchstens einmal pro Frame neu berechnen — beim Ziehen kommen viele Events
   let pending = false;
@@ -86,6 +94,8 @@ map.on('load', () => {
         setChunked(map, 'surfaces', built.surfaces);
         setChunked(map, 'markings', built.markings);
         setChunked(map, 'decor', built.decor);
+        // Netz geändert: laufende Simulation übernimmt den neuen Stand
+        if (simView.sim) simView.rebuild();
         for (const s of ['surfaces-active', 'markings-active', 'decor-active']) setData(map, s, EMPTY);
       }
       if (import.meta.env.DEV) (window as any).__streetlab.lastBuildMs = performance.now() - t0;
@@ -153,6 +163,10 @@ map.on('load', () => {
       if (road) panel.deleteRoad(road);
     } else if (e.key.toLowerCase() === 'd') {
       editor.setMode(editor.mode === 'draw' ? 'select' : 'draw');
+    } else if (e.key === ' ') {
+      e.preventDefault();
+      if (simView.running) simView.pause();
+      else simView.start();
     } else if (e.key.toLowerCase() === 'v') {
       editor.setMode('select');
     } else if (e.key.toLowerCase() === 's' && editor.selectedId) {

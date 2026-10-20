@@ -265,6 +265,16 @@ export function tram(): Shape[] {
   return out;
 }
 
+/** Pkw (ca. 4,5 m) mit dunklem Glasdach */
+export function car(color = '#e2e3e4'): Shape[] {
+  const body = roundRect(-2.25, -0.9, 2.25, 0.9, 0.45);
+  return [
+    shadow(body),
+    { pts: body, color, rank: 2 },
+    { pts: roundRect(-1.35, -0.72, 1.05, 0.72, 0.3), color: '#26292d', rank: 3 },
+  ];
+}
+
 /** Lkw (ca. 10 m): Fahrerhaus und Aufbau */
 export function truck(color = '#e9e6df'): Shape[] {
   const box = roundRect(-5.2, -1.25, 2.6, 1.25, 0.15);

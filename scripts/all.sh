@@ -15,3 +15,8 @@ run interact.mjs 4
 run ui4.mjs 5
 run storage.mjs 5
 run perf.mjs 3
+echo "== sim-test.mjs"; node scripts/sim-test.mjs 2>&1 | tail -5
+echo "== sim-diag.mjs"; node scripts/sim-diag.mjs 2>&1 | grep -v notice | cut -c1-160
+run sim.mjs 4
+# SUMO-Prüfung nur mit Python-Umgebung (pip install eclipse-sumo): SUMO_VENV=<pfad> bash scripts/all.sh
+if [ -n "$SUMO_VENV" ]; then echo "== sumo-test.mjs"; node scripts/sumo-test.mjs "$SUMO_VENV" "$out" 2>&1 | tail -6; fi

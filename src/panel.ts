@@ -31,6 +31,8 @@ import {
 } from './model';
 import { buildNetwork } from './network';
 import { presetPicker } from './presets';
+import type { SimStats } from './sim';
+import type { SimView } from './simview';
 import { downloadSumo, sumoFiles } from './sumo';
 import type { Built } from './render';
 import type { Store } from './store';
@@ -46,6 +48,8 @@ export class Panel {
   private opacity = 1;
   /** Feld, das zuletzt einen Undo-Punkt gesetzt hat — Tippen in dasselbe Feld = ein Schritt */
   private lastEditKey = '';
+  /** Verkehrssimulation (gesetzt von main) */
+  sim: SimView | null = null;
   /** Andock-Bereich oben links (gesetzt von main) */
   dock: { show: (el: HTMLElement) => void; close: () => void } = { show: () => {}, close: () => {} };
   /** wird nach jedem Neuaufbau aufgerufen (z. B. für die Werkzeugleiste) */
@@ -99,7 +103,7 @@ export class Panel {
 
   // ---- Projekt (nichts ausgewählt) -------------------------------------------
 
-  private projectView(): Node[] {
+  private projectView(): (Node | null)[] {
     const p = this.store.project;
     const style = p.markingStyle ?? 'de';
     return [
@@ -174,6 +178,7 @@ export class Panel {
         ),
         toggle('Verkehr zeigen', !!p.traffic, (v) => this.edit('traffic', () => (p.traffic = v), 'structure'), 'traffic'),
       ),
+      this.simGroup(),
       this.exportGroup(),
       this.fileGroup(),
       foldGroup(
@@ -196,6 +201,61 @@ export class Panel {
         ),
       ),
     ];
+  }
+
+  private simGroup() {
+    const sim = this.sim;
+    if (!sim) return null;
+    const stats = h('div', { class: 'sim-stats', id: 'sim-stats' }, sim.sim ? '' : 'Noch nicht gestartet.');
+    return foldGroup(
+      'sim',
+      'Simulation',
+      true,
+      h(
+        'div',
+        { class: 'row' },
+        button(sim.running ? 'Pause' : sim.sim ? 'Weiter' : 'Starten', () => (sim.running ? sim.pause() : sim.start()), {
+          icon: sim.running ? 'pause' : 'play',
+          kind: sim.running ? undefined : 'primary',
+          action: 'sim-toggle',
+        }),
+        button('Beenden', () => sim.stop(), { icon: 'stop', kind: 'ghost', disabled: !sim.sim, action: 'sim-stop' }),
+      ),
+      field(
+        'Zeitraffer',
+        segmented(
+          [1, 4, 10, 30].map((v) => ({ value: v, label: `${v}×` })),
+          sim.speed,
+          (v) => {
+            sim.speed = v;
+            this.render();
+          },
+          'sim-speed',
+        ),
+      ),
+      field(
+        'Verkehrsmenge',
+        slider(sim.flow, 100, 1500, 50, (v) => sim.setFlow(v), (v) => `${v} Kfz/h`),
+      ),
+      stats,
+      h('p', { class: 'muted small' }, 'Fahrzeuge starten an offenen Straßenenden, folgen den Spurverbindungen und beachten Ampeln, Vorfahrt und freie Plätze hinter der Kreuzung.'),
+    );
+  }
+
+  /** Kennzahlen aktualisieren, ohne die Seitenleiste neu aufzubauen */
+  showStats(s: SimStats) {
+    const el = this.root.querySelector('#sim-stats');
+    if (!el) return;
+    const mm = Math.floor(s.time / 60), ss = Math.floor(s.time % 60);
+    el.replaceChildren(
+      ...[
+        ['Simulierte Zeit', `${mm}:${String(ss).padStart(2, '0')}`],
+        ['Fahrzeuge im Netz', String(s.vehicles)],
+        ['⌀ Geschwindigkeit', `${(s.meanSpeed * 3.6).toFixed(0)} km/h`],
+        ['Angekommen', String(s.arrived)],
+        ['⌀ Reisezeit', s.arrived ? `${s.meanTravel.toFixed(0)} s` : '–'],
+      ].map(([k, v]) => h('div', {}, h('span', { class: 'muted' }, k), h('b', {}, v))),
+    );
   }
 
   private exportGroup() {

@@ -156,11 +156,19 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
       'lane-links': geo(),
       'lane-ends': geo(),
       'width-handles': geo(),
+      sim: geo(),
     },
     layers: [
       { id: 'background', type: 'background', paint: { 'background-color': '#26282b' } },
       ...rasterLayers,
       ...designLayers(),
+      {
+        id: 'sim',
+        type: 'fill',
+        source: 'sim',
+        layout: { 'fill-sort-key': ['get', 'rank'] },
+        paint: { 'fill-color': ['get', 'color'] },
+      },
       {
         id: 'draft-surfaces',
         type: 'fill',
