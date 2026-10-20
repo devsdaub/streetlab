@@ -3,6 +3,7 @@
 out="${1:-$TEMP}"
 cd "$(dirname "$0")/.."
 run() { echo "== $1"; node "scripts/$1" "$out" 2>&1 | grep -v "^\s*at " | tail -${2:-4}; }
+echo "== symbols-test.mjs"; node scripts/symbols-test.mjs 2>&1 | tail -1
 run chain.mjs 2
 run snap.mjs 1
 run ui2.mjs 6

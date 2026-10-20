@@ -1,6 +1,6 @@
 import type { Feature, Polygon } from 'geojson';
 import { add, cumulativeLength, leftNormal, linePolygons, mul, offsetPolyline, pointAt, type Vec } from './geometry';
-import { bus, cyclist, pedestrian, roadText, tram, truck, van, type Shape } from './glyphs';
+import { bus, cyclist, fitToLane, pedestrian, roadText, tram, truck, van, type Shape } from './glyphs';
 import { STRIP_TYPES, type Planting, type Strip } from './model';
 
 /** Details eines Streifens: Pfeile, Parkstände, Autos, Gleise, Bepflanzung. */
@@ -206,32 +206,30 @@ export function stripDecor(
     case 'drive':
     case 'bus':
     case 'bike': {
-      // Richtungspfeile — Abstand zu Kreuzungen, dort zeichnet die Kreuzung ihre Abbiegepfeile
-      const scale = strip.type === 'bike' ? 0.45 : 1;
+      // Richtungspfeile — Abstand zu Kreuzungen, dort zeichnet die Kreuzung ihre Abbiegepfeile.
+      // Alle Spursymbole werden auf die Spurbreite begrenzt (fitToLane).
+      const k = strip.dir === -1 ? -1 : 1;
       const a = keepOut[0] > 0 ? keepOut[0] + 30 : 4, b = L - (keepOut[1] > 0 ? keepOut[1] + 30 : 4);
       let at = positions(60, 25, a, b).map((p) => p.s);
       const word = strip.text?.trim() || (strip.type === 'bus' ? 'BUS' : '');
       if (word) {
         // Schrift auf der Fahrbahn, in Fahrtrichtung lesbar, 9 m hinter jedem Pfeil
-        const k = strip.dir === -1 ? -1 : 1;
         const big = strip.type === 'bike' ? [1.2, 0.42] : [2.4, 0.7];
         const textAt = at.length ? at : [L / 2];
-        for (const s of textAt) placeShapes(s - 9 * k, roadText(word, big[0], big[1]), k, out.markings);
+        for (const s of textAt) placeShapes(s - 9 * k, fitToLane(roadText(word, big[0], big[1]), w), k, out.markings);
       }
       if (!at.length && b - a > 2) at = [(a + b) / 2];
-      const shape = ARROW.map(([x, y]) => [x * scale, y * scale] as Vec);
-      for (const s of at) {
-        if (strip.type === 'bike') {
-          // Fahrradsymbol mit Pfeil davor
-          const k = strip.dir === -1 ? -1 : 1;
-          const f = frame(line, s);
-          for (const l of BIKE) {
-            const pts = l.map(([x, y]) => add(add(f.p, mul(f.t, x * k)), mul(f.n, y * k)));
-            for (const poly of linePolygons(pts, 0.08)) push(out.markings, poly, '#f4f4f0');
-          }
-          push(out.markings, place(line, s + 1.9 * k, shape, strip.dir === -1), '#f4f4f0');
-        } else push(out.markings, place(line, s, shape, strip.dir === -1), '#f4f4f0');
-      }
+      const arrow: Shape = { pts: ARROW, color: '#f4f4f0' };
+      // Fahrradsymbol mit Pfeil davor als eine Gruppe, damit beides zusammen in die Spur passt
+      const symbol: Shape[] =
+        strip.type === 'bike'
+          ? [
+              ...BIKE.flatMap((l) => linePolygons(l, 0.08)).map((pts) => ({ pts, color: '#f4f4f0' })),
+              { pts: ARROW.map(([x, y]) => [x * 0.45 + 1.9, y * 0.45] as Vec), color: '#f4f4f0' },
+            ]
+          : [arrow];
+      const fitted = fitToLane(symbol, w);
+      for (const s of at) placeShapes(s, fitted, k, out.markings);
       break;
     }
     case 'parking': {

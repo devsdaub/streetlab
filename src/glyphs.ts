@@ -45,6 +45,24 @@ const head = (tip: Vec, dir: Vec, len = 1.3, half = 0.45): Shape => {
   return { pts: [add(base, mul(n, half)), tip, add(base, mul(n, -half)), add(base, mul(n, half))], color: WHITE };
 };
 
+/**
+ * Regel für alle Symbole auf einer Spur: quer zur Fahrtrichtung höchstens `fill` der Spurbreite,
+ * gleichmäßig skaliert (nie vergrößert) und mittig in der Spur ausgerichtet.
+ */
+export function fitToLane(shapes: Shape[], laneWidth: number, fill = 0.8): Shape[] {
+  let lo = Infinity, hi = -Infinity;
+  for (const sh of shapes) for (const [, y] of sh.pts) (lo = Math.min(lo, y)), (hi = Math.max(hi, y));
+  if (!Number.isFinite(lo)) return shapes;
+  const scale = Math.min(1, (laneWidth * fill) / Math.max(hi - lo, 1e-6));
+  const mid = (lo + hi) / 2;
+  return shapes.map((sh) => {
+    const pts = sh.pts.map(([x, y]) => [x * scale, (y - mid) * scale] as Vec);
+    const [f, l] = [pts[0], pts[pts.length - 1]];
+    if (f[0] !== l[0] || f[1] !== l[1]) pts.push(f);
+    return { ...sh, pts };
+  });
+}
+
 // ---- Pfeile -----------------------------------------------------------------
 
 /** Abbiegepfeil, ca. 5 m lang (Schaft, Bögen, Spitzen) */

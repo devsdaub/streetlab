@@ -14,7 +14,7 @@ import {
   slicePolyline,
   type Vec,
 } from './geometry';
-import { mainSign, roundaboutArrow, sharkTeeth, stopSign, trafficLight, turnArrow, yieldSign, zebraSign, type Shape } from './glyphs';
+import { fitToLane, mainSign, roundaboutArrow, sharkTeeth, stopSign, trafficLight, turnArrow, yieldSign, zebraSign, type Shape } from './glyphs';
 import {
   STRIP_TYPES,
   controlOf,
@@ -652,7 +652,7 @@ export function buildJunction(
         else for (const poly of linePolygons([atS(x, lineAt, r), atS(x, lineAt, l)], 0.3, [0.5, 0.25])) push(res.markings, poly, WHITE);
         // Kreisverkehrspfeil hinter Querung und Fahrbahnteiler
         const sArrow = x.trim + Math.max(keepOutOf.get(x)!, mini ? 2 : 11) + 7;
-        for (const lane of g.filter(isLane)) if (sArrow < x.len - 3) place(x, sArrow, (lane.l + lane.r) / 2, roundaboutArrow(), res.markings);
+        for (const lane of g.filter(isLane)) if (sArrow < x.len - 3) place(x, sArrow, (lane.l + lane.r) / 2, fitToLane(roundaboutArrow(), lane.l - lane.r), res.markings);
       }
       continue;
     }
@@ -679,7 +679,7 @@ export function buildJunction(
       for (const back of [5.5, 26]) {
         const sPos = lineAt + back;
         // nur dort, wo die Spur ihre volle Breite hat (nicht in einer Verziehung)
-        if (sPos < Math.min(x.len - 4, (x.uniform ?? Infinity) - 3)) place(x, sPos, (lane.l + lane.r) / 2, turnArrow(turn), res.markings);
+        if (sPos < Math.min(x.len - 4, (x.uniform ?? Infinity) - 3)) place(x, sPos, (lane.l + lane.r) / 2, fitToLane(turnArrow(turn), lane.l - lane.r), res.markings);
       }
     }
     // Schilder bzw. Ampel am rechten Fahrbahnrand der Zufahrt

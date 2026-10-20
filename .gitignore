@@ -2,3 +2,4 @@ node_modules
 dist
 scripts/_*.mjs
 *.log
+scripts/.build
