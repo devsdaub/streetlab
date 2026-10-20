@@ -99,6 +99,35 @@ export function offsetPolyline(pts: Vec[], d: number): Vec[] {
     }
   }
   out.push(add(pts[n - 1], mul(normals[n - 2], d)));
+  return Math.abs(d) > 0.3 ? removeLoops(out) : out;
+}
+
+/** Schnittpunkt zweier Strecken a–b und c–d (oder null) */
+function segmentHit(a: Vec, b: Vec, c: Vec, d: Vec): Vec | null {
+  const r = sub(b, a), q = sub(d, c);
+  const den = r[0] * q[1] - r[1] * q[0];
+  if (Math.abs(den) < 1e-12) return null;
+  const w = sub(c, a);
+  const t = (w[0] * q[1] - w[1] * q[0]) / den;
+  const u = (w[0] * r[1] - w[1] * r[0]) / den;
+  return t > 1e-9 && t < 1 - 1e-9 && u > 1e-9 && u < 1 - 1e-9 ? add(a, mul(r, t)) : null;
+}
+
+/**
+ * Entfernt Schleifen, die beim Parallelverschieben am Innenrand enger Kurven entstehen:
+ * schneidet sich die Linie selbst, wird das Stück dazwischen durch den Schnittpunkt ersetzt.
+ */
+export function removeLoops(pts: Vec[], window = 80): Vec[] {
+  const out = pts.slice();
+  for (let i = 0; i < out.length - 3; i++) {
+    for (let j = Math.min(out.length - 2, i + window); j >= i + 2; j--) {
+      const x = segmentHit(out[i], out[i + 1], out[j], out[j + 1]);
+      if (x) {
+        out.splice(i + 1, j - i, x);
+        break;
+      }
+    }
+  }
   return out;
 }
 

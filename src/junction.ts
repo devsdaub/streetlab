@@ -123,8 +123,8 @@ function makeArm(input: ArmInput, toLocal: (p: LngLat) => Vec): Arm | null {
   if (local.length < 2) return null;
   let len = 0;
   for (let i = 1; i < local.length; i++) len += Math.hypot(local[i][0] - local[i - 1][0], local[i][1] - local[i - 1][1]);
-  // Richtung aus den ersten Metern — robust gegen kurze Knicke direkt am Knoten
-  const probe = pointAt(local, Math.min(4, len)).p;
+  // Richtung als Sehne über die ersten 12 m — passt auch bei gekrümmten Armen zur Ecke
+  const probe = pointAt(local, Math.min(12, len)).p;
   const pl = Math.hypot(probe[0] - local[0][0], probe[1] - local[0][1]) || 1;
   const d: Vec = [(probe[0] - local[0][0]) / pl, (probe[1] - local[0][1]) / pl];
 
@@ -208,14 +208,27 @@ function circleFillet(arm: Arm, off: number, sigma: 1 | -1, R: number, rf: numbe
 }
 
 /** Seitenstreifen beider Seiten passend zusammenführen. */
+/**
+ * Seitenstreifen beider Arme um die Ecke zusammenführen. Zugeordnet wird von außen nach innen
+ * (gleiche Typen gehen ineinander über); was nur auf einer Seite existiert, läuft um die Ecke
+ * auf null aus — z. B. ein Grünstreifen, der an der Querstraße endet.
+ */
 function sideLayout(A: ArmStrip[], B: ArmStrip[]) {
-  const same = A.length === B.length && A.every((s, i) => s.type === B[i].type);
-  if (same && A.length) return { types: A.map((s) => s.type), wa: A.map((s) => s.l - s.r), wb: B.map((s) => s.l - s.r) };
-  if (!A.length && !B.length) return { types: [], wa: [], wb: [] };
-  const all = [...A, ...B];
-  const type = all.some((s) => s.type === 'sidewalk') ? 'sidewalk' : all[all.length - 1].type;
-  const sum = (x: ArmStrip[]) => x.reduce((s, y) => s + y.l - y.r, 0);
-  return { types: [type], wa: [sum(A)], wb: [sum(B)] };
+  const a = A.slice().reverse(), b = B.slice().reverse();
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i].type === b[j].type ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const w = (x: ArmStrip) => x.l - x.r;
+  const rows: { type: StripType; wa: number; wb: number }[] = [];
+  let i = 0, j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && a[i].type === b[j].type) rows.push({ type: a[i].type, wa: w(a[i++]), wb: w(b[j++]) });
+    else if (j >= m || (i < n && dp[i + 1][j] >= dp[i][j + 1])) rows.push({ type: a[i].type, wa: w(a[i++]), wb: 0 });
+    else rows.push({ type: b[j].type, wa: 0, wb: w(b[j++]) });
+  }
+  rows.reverse();
+  return { types: rows.map((r) => r.type), wa: rows.map((r) => r.wa), wb: rows.map((r) => r.wb) };
 }
 
 export function buildJunction(
@@ -386,6 +399,24 @@ export function buildJunction(
   // 4. Querungen je Arm
   const lineAtOf = new Map<Arm, number>();
   const keepOutOf = new Map<Arm, number>();
+  /** zusammenhängende Gruppen befahrener Streifen (Mittelinseln unterbrechen die Querung) */
+  const drivenGroups = (x: Arm) => {
+    const out: { hi: number; lo: number }[] = [];
+    let cur: { hi: number; lo: number } | null = null;
+    for (const s of x.strips) {
+      if (s.type === 'drive' || s.type === 'bus' || s.type === 'tram') {
+        if (cur) cur.lo = s.r;
+        else cur = { hi: s.l, lo: s.r };
+      } else if (cur && STRIP_TYPES[s.type].carriageway && s.type !== 'parking') {
+        cur.lo = s.r; // Radstreifen zwischen Fahrstreifen bleiben Teil der Querung
+      } else if (cur) {
+        out.push(cur);
+        cur = null;
+      }
+    }
+    if (cur) out.push(cur);
+    return out;
+  };
   /** Verbindungsstück zwischen zwei nahen Knoten — wird wie Kreuzungsinneres behandelt */
   const inner = (x: Arm) => !!x.both && (x.length ?? Infinity) < 30;
   for (const a of arms) {
@@ -398,9 +429,15 @@ export function buildJunction(
       const [hi, lo] = [driven[0].l, driven[driven.length - 1].r];
       const s0 = a.trim + (roundabout ? 4 : 1);
       if (crossing === 'zebra') {
-        const piece = slicePolyline(a.local, s0, s0 + CROSSING_LEN);
-        if (piece.length >= 2) {
-          for (let o = lo + 0.3; o + 0.5 <= hi - 0.2; o += 1) push(res.markings, band(piece, o + 0.5, o), WHITE);
+        // Balken als Rechtecke in einem geraden Rahmen — auch auf gekrümmten Armen parallel
+        const { p, t } = pointAt(a.local, s0 + CROSSING_LEN / 2);
+        const n = leftNormal(t);
+        const at2 = (u: number, o: number) => add(add(p, mul(t, u)), mul(n, o));
+        const half = CROSSING_LEN / 2;
+        for (const g of drivenGroups(a)) {
+          for (let o = g.lo + 0.3; o + 0.5 <= g.hi - 0.2; o += 1) {
+            push(res.markings, [at2(-half, o), at2(half, o), at2(half, o + 0.5), at2(-half, o + 0.5)], WHITE);
+          }
         }
       } else {
         for (const s of [s0, s0 + CROSSING_LEN]) {
