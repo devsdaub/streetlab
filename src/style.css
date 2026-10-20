@@ -251,3 +251,5 @@ details.group[open] summary .ico { transform: none; }
 
 .profile-preview { height: 82px; border-radius: 6px; overflow: hidden; background: #26282b; }
 .profile-preview svg { width: 100%; height: 100%; display: block; }
+
+code { font: 11px/1.4 ui-monospace, Consolas, monospace; padding: 1px 5px; border-radius: 4px; background: var(--surface-2); color: var(--text); }

@@ -29,7 +29,9 @@ import {
   type Road,
   type StripType,
 } from './model';
+import { buildNetwork } from './network';
 import { presetPicker } from './presets';
+import { downloadSumo, sumoFiles } from './sumo';
 import type { Built } from './render';
 import type { Store } from './store';
 import { TYPE_OPTIONS, profileBar, stripDetails } from './stripeditor';
@@ -254,6 +256,16 @@ export class Panel {
           { icon: 'layers', action: 'export-svg', title: 'Ganzes Netz als Vektorgrafik (1 Einheit = 1 m)' },
         ),
       ),
+      button(
+        'Für SUMO exportieren',
+        () => {
+          const net = buildNetwork(this.store.project, this.getBuilt().junctions);
+          if (!net.edges.length) return alert('Noch keine befahrbaren Straßen vorhanden.');
+          downloadSumo(sumoFiles(net, name), name);
+        },
+        { icon: 'file', action: 'export-sumo', title: 'Knoten, Kanten, Spurverbindungen und Konfiguration für netconvert (SUMO)' },
+      ),
+      h('p', { class: 'muted small' }, 'Netz erzeugen mit: netconvert -c ', h('code', {}, `${name}.netccfg`)),
     );
   }
 

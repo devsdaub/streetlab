@@ -814,3 +814,39 @@ export class RoadRenderer {
     };
   }
 }
+
+// ---- Netzgraph für Simulation und SUMO-Export -------------------------------
+
+export interface GraphSegment {
+  id: string;
+  road: Road;
+  /** Querschnitt in Zeichenrichtung */
+  profile: Strip[];
+  /** Knoten am Anfang/Ende: nodeKey, Abschnittsgrenze (sec:…) oder offenes Ende (end:…) */
+  start: string;
+  end: string;
+  /** (geglättete) Mittellinie in Zeichenrichtung */
+  center: LngLat[];
+}
+
+/** Straßennetz als Folge von Segmenten zwischen Knoten — Grundlage für Simulation und Export. */
+export function networkGraph(roads: Road[]): { segments: GraphSegment[]; junctions: Set<string> } {
+  const hashes = new Map(roads.map((r) => [r, geomHash(r)] as const));
+  const nodes = findNodes(roads, hashes);
+  const segments = roads.flatMap((road) =>
+    segmentRoad(road, nodes).map((s) => {
+      const proj = localProjection(s.raw[0]);
+      let local = dedupe(s.raw.map(proj.fwd));
+      if (road.smooth) local = smoothPolyline(local);
+      return {
+        id: s.id,
+        road,
+        profile: s.profile,
+        start: s.start ?? `end:${s.id}:a`,
+        end: s.end ?? `end:${s.id}:b`,
+        center: local.map(proj.inv),
+      };
+    }),
+  );
+  return { segments, junctions: new Set(nodes.keys()) };
+}
