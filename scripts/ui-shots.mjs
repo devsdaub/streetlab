@@ -1,0 +1,23 @@
+// Screenshots der Oberfläche: Projekt, Straße mit Streifen, Kreuzung, Kartenfenster, Zeichnen.
+import { chromium } from 'playwright-core';
+import { scenes, ll } from './scenes.mjs';
+const out = process.argv[2];
+const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+page.on('pageerror', (e) => console.error('PAGEERROR', e.message));
+const p = structuredClone(scenes.style); p.view = { center: ll(0, 0), zoom: 18.6 };
+await page.addInitScript((p) => localStorage.setItem('streetlab.project.v1', JSON.stringify(p)), p);
+await page.goto('http://localhost:5180/');
+await page.waitForFunction(() => window.__streetlab?.editor);
+await page.waitForTimeout(2000);
+const px = (x, y) => page.evaluate(([q]) => { const s = window.__streetlab.map.project(q); const r = document.getElementById('map').getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; }, [ll(x, y)]);
+await page.screenshot({ path: `${out}/ui-project.png` });
+let q = await px(-30, 4.25); await page.mouse.click(q.x, q.y); await page.waitForTimeout(800);
+await page.screenshot({ path: `${out}/ui-road.png` });
+await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
+q = await px(0, 0); await page.mouse.click(q.x, q.y); await page.waitForTimeout(800);
+await page.screenshot({ path: `${out}/ui-node.png` });
+await page.keyboard.press('Escape');
+await page.keyboard.press('d'); await page.waitForTimeout(300);
+await page.screenshot({ path: `${out}/ui-draw.png`, clip: { x: 0, y: 0, width: 1100, height: 140 } });
+await browser.close();
