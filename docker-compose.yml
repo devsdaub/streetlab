@@ -1,0 +1,8 @@
+services:
+  streetlab:
+    build: .
+    image: streetlab:latest
+    container_name: streetlab
+    ports:
+      - "8080:80"
+    restart: unless-stopped

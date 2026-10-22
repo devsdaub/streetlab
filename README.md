@@ -12,6 +12,13 @@ npm run dev        # http://localhost:5173
 - Netz-Topologie: automatische Knoten beim Kreuzen/Anschließen (`src/topology.ts`)
 - Export: PNG gekachelt bis 100 MP, SVG (1 Einheit = 1 m)
 
+Als Container (Docker Desktop):
+
+```
+docker compose up -d --build   # http://localhost:8080
+docker compose down
+```
+
 Tests mit Edge (Dev-Server auf Port 5180 starten: `npx vite --port 5180`):
 
 ```
