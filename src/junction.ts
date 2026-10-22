@@ -18,6 +18,7 @@ import { fitToLane, mainSign, roundaboutArrow, sharkTeeth, stopSign, trafficLigh
 import {
   STRIP_TYPES,
   controlOf,
+  leftEdge,
   type ArmRole,
   type JunctionSettings,
   type LngLat,
@@ -97,6 +98,9 @@ interface Corner {
   b: Arm;
   bounds: Boundary[];
   types: StripType[];
+  /** Breite je Streifen am Arm a bzw. b (0 = gibt es dort nicht) */
+  wa: number[];
+  wb: number[];
 }
 
 export type Move = 'left' | 'straight' | 'right';
@@ -128,8 +132,7 @@ function makeArm(input: ArmInput, toLocal: (p: LngLat) => Vec): Arm | null {
   const pl = Math.hypot(probe[0] - local[0][0], probe[1] - local[0][1]) || 1;
   const d: Vec = [(probe[0] - local[0][0]) / pl, (probe[1] - local[0][1]) / pl];
 
-  const total = input.profile.reduce((s, x) => s + x.width, 0);
-  let left = total / 2;
+  let left = leftEdge(input.profile);
   let strips: ArmStrip[] = input.profile.map((s) => {
     const st: ArmStrip = { id: s.id, turn: s.turn, type: s.type, l: left, r: left - s.width, dir: s.dir };
     left -= s.width;
@@ -191,6 +194,23 @@ function projS(x: { local: Vec[] }, p: Vec): number {
     acc += Math.sqrt(l2);
   }
   return best;
+}
+
+/** Konvexe Hülle (Monotone Chain), gegen den Uhrzeigersinn */
+function convexHull(pts: Vec[]): Vec[] {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (p.length < 3) return p;
+  const cross = (o: Vec, a: Vec, b: Vec) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (list: Vec[]) => {
+    const h: Vec[] = [];
+    for (const q of list) {
+      while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop();
+      h.push(q);
+    }
+    h.pop();
+    return h;
+  };
+  return [...half(p), ...half(p.slice().reverse())];
 }
 
 const shortSweep = (a0: number, a1: number) => {
@@ -317,7 +337,7 @@ export function buildJunction(
       da += wa[k] ?? 0;
       db += wb[k] ?? 0;
     }
-    return { a, b, bounds, types };
+    return { a, b, bounds, types, wa, wb };
   });
 
   for (const a of arms) {
@@ -349,21 +369,46 @@ export function buildJunction(
     return [...r, r[0]];
   };
   /** kind: Art des Elements (für Prüfungen und Auswahl), z. B. zebra, stopline, arrow, sign, asphalt oder Streifentyp */
-  const push = (to: Feature<Polygon>[], pts: Vec[], color: string, rank = 0, kind?: string) =>
+  const push = (to: Feature<Polygon>[], pts: Vec[], color: string, rank = 0, kind?: string) => {
+    // Flächen ohne Inhalt (alle Punkte auf einer Linie) nicht ausgeben
+    let a = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const [p, q] = [pts[i], pts[(i + 1) % pts.length]];
+      a += p[0] * q[1] - q[0] * p[1];
+    }
+    if (Math.abs(a) < 0.02) return;
     to.push({ type: 'Feature', properties: { node: key, color, rank, ...(kind ? { kind } : {}) }, geometry: { type: 'Polygon', coordinates: [ring(pts)] } });
+  };
   const anyCw = arms.some((a) => a.hasCw);
 
   const asphalt: Vec[] = [];
   /** Ausrundung auf den tatsächlichen Rückschnitt begrenzen: Punkte jenseits davon würden die Ecke falten */
   const clip = (c: Corner, mid: Vec[]) => mid.filter((p) => projS(c.a, p) <= c.a.trim + 0.01 && projS(c.b, p) <= c.b.trim + 0.01);
   for (const c of corners) asphalt.push(at(c.a, c.a.cR), at(c.a, c.a.cL), ...clip(c, c.bounds[0].mid));
-  push(res.surfaces, asphalt, anyCw ? STRIP_TYPES.drive.color : STRIP_TYPES.sidewalk.color, 5, anyCw ? 'asphalt' : 'sidewalk');
+  // Nur Fußwege (Fußgängerzone, Platz): Hülle der Armenden — Ausrundungen zwischen schräg
+  // einmündenden Wegen würden die Fläche sonst falten
+  push(res.surfaces, anyCw ? asphalt : convexHull(asphalt), anyCw ? STRIP_TYPES.drive.color : STRIP_TYPES.sidewalk.color, 5, anyCw ? 'asphalt' : 'sidewalk');
 
   for (const c of corners) {
     const paths = c.bounds.map((bd) => [at(c.a, bd.offA), ...clip(c, bd.mid), at(c.b, bd.offB)]);
+    /**
+     * Streifen, den es nur auf einer Seite der Ecke gibt (Gehweg an der einen Straße, an der
+     * anderen nicht): endet in der Mitte des Eckbogens. Liefe er bis zum Rückschnitt des anderen
+     * Arms aus, entstünde bei spitzen Ecken ein langer Keil neben dessen Fahrbahn.
+     */
+    const half = (k: number, side: 'a' | 'b') => {
+      const mid = clip(c, c.bounds[k].mid);
+      const m = Math.ceil(mid.length / 2);
+      return side === 'a' ? [at(c.a, c.bounds[k].offA), ...mid.slice(0, m)] : [...mid.slice(m - 1), at(c.b, c.bounds[k].offB)];
+    };
     c.types.forEach((type, k) => {
       const color = type === 'median' ? STRIP_TYPES.sidewalk.color : STRIP_TYPES[type].color;
-      push(res.surfaces, [...paths[k], ...paths[k + 1].slice().reverse()], color, STRIP_TYPES[type].rank, type === 'median' ? 'sidewalk' : type);
+      // auch wenn eine der Ausrundungen fehlt (Bogenmitte läge hinter dem Knoten): dann endet der
+      // Streifen an der Armkante, statt bis zum Rückschnitt des anderen Arms auszulaufen
+      const oneSided = (c.wa[k] === 0 || c.wb[k] === 0) && (c.bounds[k].mid.length > 1 || c.bounds[k + 1].mid.length > 1);
+      const side = c.wb[k] === 0 ? 'a' : 'b';
+      const poly = oneSided ? [...half(k, side), ...half(k + 1, side).reverse()] : [...paths[k], ...paths[k + 1].slice().reverse()];
+      push(res.surfaces, poly, color, STRIP_TYPES[type].rank, type === 'median' ? 'sidewalk' : type);
     });
     if (c.types.length && anyCw) {
       for (const poly of linePolygons(dedupe(paths[0], 0.01), 0.2)) push(res.markings, poly, CURB);
@@ -614,7 +659,17 @@ export function buildJunction(
   const curve = (k: (typeof links)[number]) => {
     const A = laneEnd(k.from, k.inL), B = laneEnd(k.to, k.outL);
     const d = Math.hypot(B.p[0] - A.p[0], B.p[1] - A.p[1]) * 0.42;
-    const p1 = add(A.p, mul(A.t, -d)), p2 = add(B.p, mul(B.t, -d));
+    // Griffe nicht über den Schnittpunkt der Fahrlinien hinaus: sonst schwingt ein langer Weg
+    // (spitzer Winkel, weit zurückgeschnittener Arm) als S-Kurve über die Gegenspur
+    let [d1, d2] = [d, d];
+    const bendSin = Math.abs(-A.t[0] * B.t[1] + A.t[1] * B.t[0]);
+    const hit = bendSin > Math.sin(20 * DEG) ? intersectLines(A.p, mul(A.t, -1), B.p, B.t) : null;
+    if (hit) {
+      const [u, w] = hit;
+      if (u > 0) d1 = Math.min(d1, Math.max(1, u));
+      d2 = w < 0 ? Math.min(d2, Math.max(1, -w)) : Math.min(d2, 1);
+    }
+    const p1 = add(A.p, mul(A.t, -d1)), p2 = add(B.p, mul(B.t, -d2));
     return Array.from({ length: 17 }, (_, i) => {
       const u = i / 16, v = 1 - u;
       return [
@@ -635,15 +690,26 @@ export function buildJunction(
       }
     }
   }
+  /**
+   * Radfurt je Zufahrt nur für die geradeste Geradeaus-Verbindung: Rechtsabbieger folgen dem
+   * Bordstein, Linksabbieger biegen indirekt ab — malte man alle, fächerten die Furten auf.
+   */
+  const furtOf = new Map<string, (typeof links)[number]>();
+  const bend = (k: (typeof links)[number]) => Math.abs(shortSweep(k.from.ang + Math.PI, k.to.ang));
+  for (const k of links) {
+    if (!isBike(k.inL) || k.move !== 'straight') continue;
+    const cur = furtOf.get(k.inL.id);
+    if (!cur || bend(k) < bend(cur)) furtOf.set(k.inL.id, k);
+  }
   for (const k of links) {
     const pts = curve(k);
     const bike = isBike(k.inL);
     res.info.links.push({ from: k.inL.id, to: k.outL.id, move: k.move, bike, pts: pts.map(proj.inv) });
     if (bike) {
       // Radfurt entlang der Verbindung: grünes Band mit unterbrochenen Rändern
-      if (!st.bikeCrossing) continue;
+      if (!st.bikeCrossing || furtOf.get(k.inL.id) !== k) continue;
       const w = Math.min(k.inL.l - k.inL.r, k.outL.l - k.outL.r);
-      push(res.surfaces, band(pts, w / 2, -w / 2), STRIP_TYPES.bike.color, 6, 'bike');
+      push(res.surfaces, band(pts, w / 2, -w / 2), STRIP_TYPES.bike.color, 6, 'furt');
       for (const side of [w / 2, -w / 2]) {
         for (const poly of linePolygons(offsetPolyline(pts, side), 0.25, [0.5, 0.5])) push(res.markings, poly, WHITE);
       }

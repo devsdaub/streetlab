@@ -9,7 +9,7 @@ const project = scene.endsWith('.json') ? JSON.parse(readFileSync(scene, 'utf8')
 if (process.env.BASEMAP) project.basemap = process.env.BASEMAP;
 if (zoom) project.view = { center: ll(+dx || 0, +dy || 0), zoom: +zoom };
 
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.on('pageerror', (e) => console.error('PAGEERROR', e.message));
 page.on('console', (m) => m.type() === 'error' && console.error('CONSOLE', m.text()));

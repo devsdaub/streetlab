@@ -7,7 +7,7 @@ const [scene, out, secs = '90', count = '3'] = process.argv.slice(2);
 const project = scene.endsWith('.json') ? JSON.parse(readFileSync(scene, 'utf8')) : structuredClone(scenes[scene]);
 // optional andere Ansicht: VIEW="lng,lat,zoom"
 if (process.env.VIEW) { const [x, y, z] = process.env.VIEW.split(',').map(Number); project.view = { center: [x, y], zoom: z }; }
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.on('pageerror', (e) => console.error('PAGEERROR', e.message));
 await page.addInitScript((p) => localStorage.setItem('streetlab.project.v1', JSON.stringify(p)), project);

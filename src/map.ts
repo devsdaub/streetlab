@@ -139,7 +139,7 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
     id,
     type: 'raster',
     source: id,
-    layout: { visibility: id === basemap ? 'visible' : 'none' },
+    layout: { visibility: visibleBasemaps(basemap).has(id) ? 'visible' : 'none' },
   }));
 
   const style: StyleSpecification = {
@@ -157,6 +157,10 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
       'lane-ends': geo(),
       'width-handles': geo(),
       sim: geo(),
+      'import-box': geo(),
+      brush: geo(),
+      'rb-preview': geo(),
+      affected: geo(),
     },
     layers: [
       { id: 'background', type: 'background', paint: { 'background-color': '#26282b' } },
@@ -177,6 +181,23 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
         paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.75 },
       },
       { id: 'draft-markings', type: 'fill', source: 'draft-markings', paint: { 'fill-color': ['get', 'color'] } },
+      // Lasso für „Bestand übernehmen“ (draft-*: wird beim Export ausgeblendet)
+      { id: 'draft-import-fill', type: 'fill', source: 'import-box', paint: { 'fill-color': '#38bdf8', 'fill-opacity': 0.12 } },
+      { id: 'draft-import-line', type: 'line', source: 'import-box', paint: { 'line-color': '#38bdf8', 'line-width': 2, 'line-dasharray': [2, 1.5] } },
+      // Abschnitt, der beim Ziehen entlang der Straße den neuen Querschnitt bekommt
+      { id: 'draft-brush-fill', type: 'fill', source: 'brush', paint: { 'fill-color': '#38bdf8', 'fill-opacity': 0.18 } },
+      { id: 'draft-brush-line', type: 'line', source: 'brush', paint: { 'line-color': '#38bdf8', 'line-width': 2 } },
+      // Kreisverkehr aufziehen: Kreisfahrbahn blau, künftige Mittelinsel rot
+      {
+        id: 'draft-rb-fill',
+        type: 'fill',
+        source: 'rb-preview',
+        paint: { 'fill-color': ['match', ['get', 'part'], 'island', '#ef4444', '#38bdf8'], 'fill-opacity': ['match', ['get', 'part'], 'island', 0.3, 0.22] },
+      },
+      { id: 'draft-rb-line', type: 'line', source: 'rb-preview', paint: { 'line-color': '#38bdf8', 'line-width': 1.5 } },
+      // Straße, an die beim Zeichnen angeschlossen wird
+      { id: 'draft-affected-fill', type: 'fill', source: 'affected', paint: { 'fill-color': '#38bdf8', 'fill-opacity': 0.12 } },
+      { id: 'draft-affected-line', type: 'line', source: 'affected', paint: { 'line-color': '#38bdf8', 'line-width': 1.5 } },
       {
         id: 'edit-line',
         type: 'line',
@@ -187,8 +208,16 @@ export function createMap(container: HTMLElement, view: Project['view'], basemap
         id: 'draft-line',
         type: 'line',
         source: 'draft',
-        filter: ['==', '$type', 'LineString'],
+        filter: ['all', ['==', '$type', 'LineString'], ['!has', 'guide']],
         paint: { 'line-color': '#facc15', 'line-width': 2, 'line-dasharray': [2, 1.5] },
+      },
+      {
+        // Hilfslinie des Richtungsfangs (geradeaus, 90°, parallel …)
+        id: 'draft-guide',
+        type: 'line',
+        source: 'draft',
+        filter: ['has', 'guide'],
+        paint: { 'line-color': '#38bdf8', 'line-width': 1.5, 'line-dasharray': [4, 3], 'line-opacity': 0.9 },
       },
       {
         id: 'draft-points',
@@ -281,8 +310,35 @@ export function setData(map: maplibregl.Map, source: string, data: FeatureCollec
   (map.getSource(source) as GeoJSONSource | undefined)?.setData(data);
 }
 
+/**
+ * Landes-Orthofotos decken nur ihr Bundesland ab und hängen an einzelnen Servern — darunter liegt
+ * immer das weltweite Luftbild, damit außerhalb oder bei Ausfall nicht alles grau bleibt.
+ */
+const visibleBasemaps = (which: Basemap): Set<string> => new Set(which.startsWith('dop-') ? ['sat', which] : [which]);
+
 export function setBasemap(map: maplibregl.Map, which: Basemap) {
-  for (const id of BASEMAP_IDS) map.setLayoutProperty(id, 'visibility', id === which ? 'visible' : 'none');
+  const on = visibleBasemaps(which);
+  for (const id of BASEMAP_IDS) map.setLayoutProperty(id, 'visibility', on.has(id) ? 'visible' : 'none');
+}
+
+/**
+ * Meldet einmal je Hintergrund, wenn dessen Kacheln nicht geladen werden können (Server aus,
+ * gesperrt, keine Daten). Der Aufrufer zeigt den Hinweis an.
+ */
+export function watchBasemapErrors(map: maplibregl.Map, onFail: (id: keyof typeof BASEMAPS) => void) {
+  const failures = new Map<string, number>();
+  const reported = new Set<string>();
+  map.on('error', (e: any) => {
+    const id = e?.sourceId as keyof typeof BASEMAPS | undefined;
+    if (!id || !(id in BASEMAPS) || reported.has(id)) return;
+    // einzelne Fehlkacheln sind normal (Rand des Bundeslands) — erst gehäuft melden
+    const n = (failures.get(id) ?? 0) + 1;
+    failures.set(id, n);
+    if (n >= 4) {
+      reported.add(id);
+      onFail(id);
+    }
+  });
 }
 
 export function setDesignOpacity(map: maplibregl.Map, opacity: number) {
@@ -307,14 +363,15 @@ export function exportSize(map: maplibregl.Map, scale: number) {
  * Kachel für Kachel (1024 px) mit entsprechend höherem Zoom — so lädt auch das Luftbild feinere
  * Kacheln, statt hochskaliert zu werden — und die Kacheln werden zu einem Bild zusammengesetzt.
  */
-export async function exportPng(map: maplibregl.Map, filename: string, scale: number, onProgress?: (p: number) => void) {
+/** `skip`: Hintergründe, deren Server ausgefallen ist — ihre Kacheln kämen nie, der Export hinge */
+export async function exportPng(map: maplibregl.Map, filename: string, scale: number, onProgress?: (p: number) => void, skip: Set<string> = new Set()) {
   const { width: w, height: h, effective } = exportSize(map, scale);
 
   const host = document.createElement('div');
   host.style.cssText = `position:fixed;left:-${TILE + 50}px;top:0;width:${TILE}px;height:${TILE}px;`;
   document.body.append(host);
   const style = map.getStyle();
-  style.layers = style.layers.filter((l) => !l.id.startsWith('edit-') && !l.id.startsWith('draft'));
+  style.layers = style.layers.filter((l) => !l.id.startsWith('edit-') && !l.id.startsWith('draft') && !skip.has(l.id));
 
   const off = new maplibregl.Map({
     container: host,
@@ -328,15 +385,24 @@ export async function exportPng(map: maplibregl.Map, filename: string, scale: nu
     preserveDrawingBuffer: true,
     maxZoom: 24,
   });
-  const idle = () =>
-    new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Zeitüberschreitung beim Laden der Kacheln')), 120_000);
+  const waitIdle = (ms: number) =>
+    new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), ms);
       off.once('idle', () => {
         clearTimeout(timer);
-        resolve();
+        resolve(true);
       });
       off.triggerRepaint();
     });
+  // Hängt ein Hintergrund-Server, wird ohne ihn weitergerendert statt abzubrechen
+  let basemapDropped = false;
+  const idle = async () => {
+    if (await waitIdle(basemapDropped ? 120_000 : 30_000)) return;
+    if (basemapDropped) throw new Error('Zeitüberschreitung beim Laden der Kacheln');
+    basemapDropped = true;
+    for (const id of BASEMAP_IDS) if (off.getLayer(id)) off.setLayoutProperty(id, 'visibility', 'none');
+    if (!(await waitIdle(120_000))) throw new Error('Zeitüberschreitung beim Laden der Kacheln');
+  };
 
   try {
     await idle();

@@ -21,6 +21,7 @@ import { buildJunction, type ArmInput, type JunctionInfo } from './junction';
 import {
   STRIP_TYPES,
   defaultJunction,
+  leftEdge,
   reverseProfile,
   sameProfile,
   type JunctionSettings,
@@ -135,8 +136,7 @@ function stripFeatures(
   const out = emptyFeatures();
   if (center.length < 2 || !profile.length) return out;
   const ring = (pts: Vec[]) => pts.map(proj.inv);
-  const total = profile.reduce((s, x) => s + x.width, 0);
-  let left = total / 2;
+  let left = leftEdge(profile);
 
   profile.forEach((strip, i) => {
     const right = left - strip.width;
@@ -213,6 +213,11 @@ interface MorphStrip {
   bId?: string;
   /** Bord-Elemente (Gehweg, Grün, Parken) wechseln kurz in der Mitte statt über die ganze Länge */
   quick: boolean;
+  /**
+   * Seitenraum (Gehweg, Grün, Insel), der beginnt oder endet: setzt in der Mitte mit voller Breite
+   * ein wie ein echter Bordstein — eine meterlange Spitze sähe aus wie ein Zeichenfehler
+   */
+  step?: boolean;
 }
 
 const flowing = (t: Strip['type']) => t === 'drive' || t === 'bus' || t === 'tram' || t === 'bike';
@@ -228,8 +233,9 @@ function alignProfiles(A: Strip[], B: Strip[], link: (id: string) => string | un
     from: a.type !== b.type ? a : undefined,
     quick: a.type !== b.type || !flowing(b.type),
   });
-  const ends = (a: Strip): MorphStrip => ({ type: a.type, dir: a.dir, wA: a.width, wB: 0, src: a, aId: a.id, quick: !flowing(a.type) });
-  const grows = (b: Strip): MorphStrip => ({ type: b.type, dir: b.dir, wA: 0, wB: b.width, src: b, bId: b.id, quick: !flowing(b.type) });
+  const side = (t: Strip['type']) => !STRIP_TYPES[t].carriageway;
+  const ends = (a: Strip): MorphStrip => ({ type: a.type, dir: a.dir, wA: a.width, wB: 0, src: a, aId: a.id, quick: !flowing(a.type), step: side(a.type) });
+  const grows = (b: Strip): MorphStrip => ({ type: b.type, dir: b.dir, wA: 0, wB: b.width, src: b, bId: b.id, quick: !flowing(b.type), step: side(b.type) });
 
   const aIdx = new Map(A.map((x, i) => [x.id, i]));
   let fixed: [number, number][] = [];
@@ -298,7 +304,7 @@ function morphFeatures(
   const cum = cumulativeLength(pts);
   const tRaw = cum.map((s) => Math.min(1, Math.max(0, (s0 + s - zoneStart) / zoneLen)));
   // Bord-Elemente wechseln im mittleren Drittel, Fahrstreifen über die ganze Länge
-  const ease = (m: MorphStrip, t: number) => (m.quick ? smoothstep((t - 0.35) / 0.3) : smoothstep(t));
+  const ease = (m: MorphStrip, t: number) => (m.step ? (t < 0.5 ? 0 : 1) : m.quick ? smoothstep((t - 0.35) / 0.3) : smoothstep(t));
   // Normale je Punkt: Mittel der angrenzenden Strecken
   const normals = pts.map((_, i) => {
     const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
@@ -309,7 +315,7 @@ function morphFeatures(
   /** Versatz der linken Kante von Streifen j an Punkt i */
   const leftOf = (i: number, j: number) => {
     const w = widths[i];
-    let left = w.reduce((s, x) => s + x, 0) / 2;
+    let left = leftEdge(morph.map((m, k) => ({ type: m.type, width: w[k] })));
     for (let k = 0; k < j; k++) left -= w[k];
     return left;
   };
@@ -324,7 +330,12 @@ function morphFeatures(
     if (Math.max(m.wA, m.wB) < 0.05) return;
     const info = STRIP_TYPES[m.type];
     const l = line(j, 'l'), r = line(j, 'r');
-    const poly = (from: number, to: number, strip: Strip) => {
+    // nur, wo der Streifen eine Breite hat (beginnende/endende Streifen nicht als Linie ins Leere)
+    const present = widths.map((w) => w[j] > 0.02);
+    const poly = (from0: number, to0: number, strip: Strip) => {
+      let [from, to] = [from0, to0];
+      while (from < to && !present[from]) from++;
+      while (to > from && !present[to]) to--;
       const ll = l.slice(from, to + 1), rr = r.slice(from, to + 1).reverse();
       if (ll.length < 2) return;
       out.surfaces.push({
@@ -347,9 +358,21 @@ function morphFeatures(
     const a = { ...m.src, type: m.type, dir: m.dir }, b = { ...next.src, type: next.type, dir: next.dir };
     // Leitlinien nur zwischen fließenden Streifen, Bord-Elemente bekommen nur ihre Kante
     if (!m.quick && !next.quick) lines.push(...markingLines(autoLine(a, b), style));
+    // Linien nur, wo beide Nachbarn vorhanden sind (je zusammenhängendes Stück)
+    const both = widths.map((w) => w[j] > 0.02 && w[j + 1] > 0.02);
+    const runs: [number, number][] = [];
+    both.forEach((b, i) => {
+      if (!b) return;
+      if (runs.length && runs[runs.length - 1][1] === i - 1) runs[runs.length - 1][1] = i;
+      else runs.push([i, i]);
+    });
     for (const ln of lines) {
-      for (const poly of linePolygons(line(j, 'r', ln.shift), ln.width, ln.dash, phase)) {
-        out.markings.push({ type: 'Feature', properties: { roadId, color: ln.color }, geometry: { type: 'Polygon', coordinates: [ring(poly)] } });
+      const full = line(j, 'r', ln.shift);
+      for (const [a0, a1] of runs) {
+        if (a1 - a0 < 1) continue;
+        for (const poly of linePolygons(full.slice(a0, a1 + 1), ln.width, ln.dash, phase + (cum[a0] ?? 0))) {
+          out.markings.push({ type: 'Feature', properties: { roadId, color: ln.color }, geometry: { type: 'Polygon', coordinates: [ring(poly)] } });
+        }
       }
     }
   });
@@ -360,7 +383,7 @@ function morphFeatures(
 function stripCenters(profile: Strip[], center: Vec[], s: number, proj: Proj) {
   const { p, t } = pointAt(center, s);
   const n = leftNormal(t);
-  let left = profile.reduce((a, x) => a + x.width, 0) / 2;
+  let left = leftEdge(profile);
   return profile.map((x) => {
     const o = left - x.width / 2;
     left -= x.width;
@@ -803,30 +826,81 @@ export class RoadRenderer {
     }
     this.featCache = featCache;
 
+    // Tempo je Knoten: ein Schild nur, wo sich die Höchstgeschwindigkeit ändert (oder die Straße frei endet)
+    const speedsAt = new Map<string, { id: string; speed?: number }[]>();
+    for (const road of roads)
+      for (const p of road.points) {
+        const k = nodeKey(p);
+        speedsAt.set(k, [...(speedsAt.get(k) ?? []), { id: road.id, speed: road.speed }]);
+      }
+    const sameSpeedBeyond = (road: Road, p: LngLat) => {
+      const others = (speedsAt.get(nodeKey(p)) ?? []).filter((o) => o.id !== road.id);
+      return others.length > 0 && others.every((o) => o.speed === road.speed);
+    };
+
+    // Rückschnitt am Straßenende (Kreuzungsbereich) — Schilder stehen dahinter, nicht auf der Kreuzung
+    const trimAt = new Map<string, number>();
+    for (const c of chains) {
+      const [t0, t1] = trims.get(c.id) ?? [0, 0];
+      if (c.start) trimAt.set(`${c.parts[0].seg.road.id}|${c.start}`, t0);
+      if (c.end) trimAt.set(`${c.parts[c.parts.length - 1].seg.road.id}|${c.end}`, t1);
+    }
+
     for (const road of roads) {
       if (!road.speed || road.points.length < 2) continue;
       const proj = localProjection(road.points[0]);
       const pts = road.points.map(proj.fwd);
+      const length = polylineLength(pts);
       const sign = speedSign(road.speed);
-      const placeSign = (p: Vec, q: Vec, total: number) => {
-        // von p Richtung q, Schild rechts in dieser Fahrtrichtung
-        const l = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1;
-        const t: Vec = [(q[0] - p[0]) / l, (q[1] - p[1]) / l];
+      /**
+       * Querversatz (+ = links in Zeichenrichtung) für ein Schild auf Gehweg oder Grün: bevorzugt
+       * rechts in Fahrtrichtung, sonst auf der anderen Seite; ohne Seitenraum kein Schild.
+       */
+      const spot = (prof: Strip[], rightFirst: 'start' | 'end'): number | null => {
+        let left = leftEdge(prof);
+        const placed = prof.map((x) => {
+          const o = { x, l: left, r: left - x.width };
+          left -= x.width;
+          return o;
+        });
+        const roadside = (x: Strip) => x.type === 'sidewalk' || x.type === 'green' || x.type === 'median';
+        // vom Rand nach innen bis zur Fahrbahn
+        const fromEdge = (list: typeof placed) => {
+          for (const o of list) {
+            if (roadside(o.x)) return (o.l + o.r) / 2;
+            if (STRIP_TYPES[o.x.type].carriageway) return null;
+          }
+          return null;
+        };
+        // Fahrt in Zeichenrichtung: rechts = Ende des Querschnitts
+        const right = rightFirst === 'start' ? placed.slice().reverse() : placed;
+        const other = rightFirst === 'start' ? placed : placed.slice().reverse();
+        return fromEdge(right) ?? fromEdge(other);
+      };
+      /** Schild ab dem Ende `from` (Anfang oder Ende der Straße), möglichst rechts in Fahrtrichtung */
+      const placeSign = (from: 'start' | 'end', prof: Strip[]) => {
+        const line = from === 'start' ? pts : pts.slice().reverse();
+        const end = road.points[from === 'start' ? 0 : road.points.length - 1];
+        const along = Math.max(6, (trimAt.get(`${road.id}|${nodeKey(end)}`) ?? 0) + 3);
+        // kein Platz zwischen Kreuzungsbereich und Straßenmitte: lieber kein Schild als eines auf der Kreuzung
+        if (along > length / 2) return;
+        const off = spot(prof, from);
+        if (off === null) return;
+        const { p, t } = pointAt(line, along);
         const n = leftNormal(t);
-        // auf dem Gehweg nahe dem äußeren Rand
-        const off = Math.max(0, total / 2 - 1.3);
-        const c: Vec = [p[0] + t[0] * 6 - n[0] * off, p[1] + t[1] * 6 - n[1] * off];
+        // Querversatz gilt in Zeichenrichtung; vom Ende her ist links und rechts vertauscht
+        const o = from === 'start' ? off : -off;
+        const c: Vec = [p[0] + n[0] * o, p[1] + n[1] * o];
         for (const sh of sign) {
           decor.push({
             type: 'Feature',
-            properties: { roadId: road.id, color: sh.color, rank: sh.rank ?? 6 },
+            properties: { roadId: road.id, color: sh.color, rank: sh.rank ?? 6, kind: 'sign' },
             geometry: { type: 'Polygon', coordinates: [sh.pts.map(([x, y]) => proj.inv([c[0] + t[0] * x + n[0] * y, c[1] + t[1] * x + n[1] * y]))] },
           });
         }
       };
-      const width = (p: Strip[]) => p.reduce((s, x) => s + x.width, 0);
-      placeSign(pts[0], pts[1], width(road.profile));
-      placeSign(pts[pts.length - 1], pts[pts.length - 2], width(profileAt(road, pts.length - 1)));
+      if (!sameSpeedBeyond(road, road.points[0])) placeSign('start', road.profile);
+      if (!sameSpeedBeyond(road, road.points[road.points.length - 1])) placeSign('end', profileAt(road, pts.length - 1));
     }
 
     return {

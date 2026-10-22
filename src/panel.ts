@@ -46,6 +46,8 @@ export class Panel {
   private exportScale = 2;
   private updateExportInfo = () => {};
   private opacity = 1;
+  /** Hintergründe, deren Server keine Kacheln liefert (gesetzt von main) */
+  basemapFailed = new Set<string>();
   /** Feld, das zuletzt einen Undo-Punkt gesetzt hat — Tippen in dasselbe Feld = ein Schritt */
   private lastEditKey = '';
   /** Verkehrssimulation (gesetzt von main) */
@@ -151,6 +153,13 @@ export class Panel {
             'basemap',
           ),
         ),
+        this.basemapFailed.has(this.basemap)
+          ? h(
+              'p',
+              { class: 'muted small', 'data-notice': 'basemap' },
+              `${BASEMAPS[this.basemap as keyof typeof BASEMAPS].label}: Der Server liefert gerade keine Bilder. Darunter wird das weltweite Luftbild gezeigt.`,
+            )
+          : null,
         field(
           'Markierung',
           segmented(
@@ -192,8 +201,13 @@ export class Panel {
             ['V', 'Auswählen'],
             ['D', 'Straße zeichnen'],
             ['S', 'Ausgewählte Straße teilen'],
+            ['K', 'Kurve mit festem Radius'],
+            ['R', 'Kreisverkehr auf eine Kreuzung aufziehen'],
+            ['A', 'Abschnitt entlang einer Straße ziehen'],
+            ['B', 'Bestand aus OpenStreetMap übernehmen'],
             ['Mittlere Maustaste', 'Karte verschieben'],
-            ['Alt', 'Beim Zeichnen nicht fangen'],
+            ['G', 'Fang an/aus'],
+            ['Alt', 'Fang für einen Punkt umkehren'],
             ['Rechtsklick', 'Punkt löschen'],
             ['Entf', 'Straße löschen'],
             ['Strg+Z / Strg+Y', 'Rückgängig / Wiederholen'],
@@ -276,7 +290,7 @@ export class Panel {
         png.disabled = true;
         label.textContent = 'Wird gerendert …';
         try {
-          await exportPng(this.map, `${name}.png`, this.exportScale, (p) => (label.textContent = `Wird gerendert … ${Math.round(p * 100)} %`));
+          await exportPng(this.map, `${name}.png`, this.exportScale, (p) => (label.textContent = `Wird gerendert … ${Math.round(p * 100)} %`), this.basemapFailed);
         } catch (err) {
           alert(`Export fehlgeschlagen: ${err}`);
         } finally {

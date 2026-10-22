@@ -4,7 +4,7 @@ import { ll } from './scenes.mjs';
 const out = process.argv[2];
 
 const project = { version: 1, name: 'Kettentest', view: { center: ll(0, 0), zoom: 17.6 }, roads: [] };
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.on('pageerror', (e) => console.error('PAGEERROR', e.message));
 await page.addInitScript((p) => localStorage.setItem('streetlab.project.v1', JSON.stringify(p)), project);

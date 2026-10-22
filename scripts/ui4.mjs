@@ -2,7 +2,7 @@
 import { chromium } from 'playwright-core';
 import { scenes, ll } from './scenes.mjs';
 const out = process.argv[2];
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
 const open = async (scene, view) => {
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   page.on('pageerror', (e) => console.error('PAGEERROR', e.message));

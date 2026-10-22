@@ -1,6 +1,6 @@
 /** Vorlagen-Galerie: Querschnitte als kleine, mit dem echten Renderer erzeugte Vorschaubilder. */
 import type { Polygon } from 'geojson';
-import { PRESETS, PRESET_CATEGORIES, presetProfile, type PresetCategory, type Strip } from './model';
+import { PRESETS, PRESET_CATEGORIES, leftEdge, presetProfile, type PresetCategory, type Strip } from './model';
 import { buildRoad } from './render';
 import { fmtM, h, icon } from './ui';
 
@@ -22,14 +22,16 @@ export function profileSvg(profile: Strip[], aspect = 2.45): string {
   const road = { id: 'preview', name: '', smooth: false, profile, points: [[-length / 2 / M, 0], [length / 2 / M, 0]] as [number, number][] };
   const f = buildRoad(road);
   const total = profile.reduce((s, x) => s + x.width, 0);
+  // Querschnitt reicht von leftEdge (links, oben im Bild) bis leftEdge − total
+  const top = -leftEdge(profile);
   const pad = 0.6;
   const byRank = (a: { properties: any }, b: { properties: any }) => (a.properties?.rank ?? 0) - (b.properties?.rank ?? 0);
   const path = (poly: Polygon) => 'M' + poly.coordinates[0].map(([x, y]) => `${(x * M).toFixed(2)} ${(-y * M).toFixed(2)}`).join('L') + 'Z';
   const layers = [...f.surfaces].sort(byRank).concat(f.markings, [...f.decor].sort(byRank));
   const body = layers.map((ft) => `<path fill="${ft.properties?.color}" d="${path(ft.geometry)}"/>`).join('');
   const svg =
-    `<svg xmlns="${SVG}" viewBox="${-length / 2} ${-total / 2 - pad} ${length} ${total + 2 * pad}" preserveAspectRatio="xMidYMid meet">` +
-    `<rect x="${-length / 2}" y="${-total / 2 - pad}" width="${length}" height="${total + 2 * pad}" fill="#26282b"/>${body}</svg>`;
+    `<svg xmlns="${SVG}" viewBox="${-length / 2} ${top - pad} ${length} ${total + 2 * pad}" preserveAspectRatio="xMidYMid meet">` +
+    `<rect x="${-length / 2}" y="${top - pad}" width="${length}" height="${total + 2 * pad}" fill="#26282b"/>${body}</svg>`;
   cache.set(key, svg);
   return svg;
 }

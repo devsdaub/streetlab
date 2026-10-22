@@ -178,6 +178,32 @@ export function intersectLines(p1: Vec, d1: Vec, p2: Vec, d2: Vec): [number, num
 }
 
 export const leftNormal = (d: Vec): Vec => [-d[1], d[0]];
+
+/**
+ * Kreisbogen, der in s mit der Richtung t (Einheitsvektor) beginnt und in e endet — für das
+ * Kurven-Werkzeug. Punkte etwa alle 8°; radius = Infinity bei einer Geraden. null, wenn e hinter
+ * dem Anfang liegt (Bogen über 180°).
+ */
+export function tangentArc(s: Vec, t: Vec, e: Vec): { pts: Vec[]; radius: number; length: number; endDir: Vec } | null {
+  const v = sub(e, s);
+  const chord = len(v);
+  if (chord < 0.01) return null;
+  const n = leftNormal(t);
+  // Sehnenwinkel zur Anfangsrichtung; der Bogen überstreicht das Doppelte
+  const phi = Math.atan2(dot(v, n), dot(v, t));
+  if (Math.abs(phi) > Math.PI / 2 - 0.02) return null;
+  if (Math.abs(phi) < 1e-4) return { pts: [s, e], radius: Infinity, length: chord, endDir: mul(v, 1 / chord) };
+  const R = chord / (2 * Math.sin(phi)); // Vorzeichen: > 0 links herum
+  const steps = Math.max(2, Math.ceil(Math.abs(2 * phi) / ((8 * Math.PI) / 180)));
+  const pts: Vec[] = [];
+  for (let k = 0; k <= steps; k++) {
+    const a = (2 * phi * k) / steps;
+    pts.push(add(s, add(mul(t, R * Math.sin(a)), mul(n, R * (1 - Math.cos(a))))));
+  }
+  pts[pts.length - 1] = e;
+  const c = Math.cos(2 * phi), si = Math.sin(2 * phi);
+  return { pts, radius: Math.abs(R), length: Math.abs(R * 2 * phi), endDir: [t[0] * c - t[1] * si, t[0] * si + t[1] * c] };
+}
 export { add, mul, sub };
 
 /** Fläche (geschlossener Ring) zwischen zwei Abständen zur Mittellinie. */

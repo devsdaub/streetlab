@@ -1,8 +1,11 @@
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
 import { Editor } from './editor';
-import { EMPTY, createMap, setChunked, setData, type Basemap } from './map';
+import { EMPTY, createMap, setChunked, setData, watchBasemapErrors, type Basemap } from './map';
 import { MapEditor } from './mapedit';
+import { OsmImporter } from './osmimport';
+import { SectionBrush } from './brush';
+import { RoundaboutTool } from './roundabout';
 import { Panel } from './panel';
 import { SimView } from './simview';
 import { Toolbar } from './toolbar';
@@ -16,6 +19,14 @@ const map = createMap(document.getElementById('map')!, store.project.view, (stor
 const roads = new RoadRenderer();
 const draft = new RoadRenderer();
 let built: Built = { surfaces: EMPTY, markings: EMPTY, decor: EMPTY };
+
+// Kachelfehler kommen teils schon vor 'load' — daher sofort mitzählen, Anzeige folgt mit dem Panel
+const basemapFailed = new Set<string>();
+let basemapNotice = () => {};
+watchBasemapErrors(map, (id) => {
+  basemapFailed.add(id);
+  basemapNotice();
+});
 
 if (import.meta.env.DEV) (window as any).__streetlab = { map, store };
 
@@ -31,11 +42,27 @@ map.on('load', () => {
     else if (props?.stripId) mapEditor.open({ kind: 'strip', roadId: props.roadId as string, stripId: props.stripId as string, at });
     else mapEditor.close();
   };
-  editor.onModeChange = (mode) => mode !== 'select' && mapEditor.close();
+  // Bestand aus OpenStreetMap übernehmen
+  const importer = new OsmImporter(map, store, editor);
+  importer.dock = mapEditor;
+  if (import.meta.env.DEV) (window as any).__streetlab.importer = importer;
+  // Abschnitt entlang einer Straße ziehen
+  const brush = new SectionBrush(map, store, editor);
+  // Kreisverkehr auf eine Kreuzung aufziehen
+  const roundabout = new RoundaboutTool(map, store, editor);
+  editor.onModeChange = (mode) => {
+    if (mode !== 'select') mapEditor.close();
+    if (mode !== 'import') importer.reset();
+    if (mode !== 'section') brush.reset();
+    if (mode !== 'roundabout') roundabout.reset();
+  };
   if (import.meta.env.DEV) (window as any).__streetlab.editor = editor;
   const panel = new Panel(document.getElementById('panel')!, map, store, editor, () => built);
   const toolbar = new Toolbar(document.getElementById('toolbar')!, map, store, editor);
   panel.onRender = () => toolbar.render();
+  brush.profile = () => toolbar.currentPreset();
+  panel.basemapFailed = basemapFailed;
+  basemapNotice = () => panel.render();
   panel.dock = toolbar.dock = mapEditor;
   // Verkehrssimulation
   const simView = new SimView(map, store, () => built);
@@ -169,6 +196,18 @@ map.on('load', () => {
       else simView.start();
     } else if (e.key.toLowerCase() === 'v') {
       editor.setMode('select');
+    } else if (e.key === 'Enter' && editor.mode === 'curve') {
+      editor.setMode('select');
+    } else if (e.key.toLowerCase() === 'r' && !e.ctrlKey && !e.metaKey) {
+      editor.setMode(editor.mode === 'roundabout' ? 'select' : 'roundabout');
+    } else if (e.key.toLowerCase() === 'g') {
+      toolbar.toggleSnapping();
+    } else if (e.key.toLowerCase() === 'k') {
+      editor.setMode(editor.mode === 'curve' ? 'select' : 'curve');
+    } else if (e.key.toLowerCase() === 'a' && !e.ctrlKey && !e.metaKey) {
+      editor.setMode(editor.mode === 'section' ? 'select' : 'section');
+    } else if (e.key.toLowerCase() === 'b') {
+      editor.setMode(editor.mode === 'import' ? 'select' : 'import');
     } else if (e.key.toLowerCase() === 's' && editor.selectedId) {
       editor.setMode(editor.mode === 'split' ? 'select' : 'split');
     }

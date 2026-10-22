@@ -347,14 +347,16 @@ export class Simulation {
     const ex = t.lane ? v.exit : null;
     if (ex && v.cleared !== ex && (!ahead || ahead.s - ahead.len > ex.stop)) {
       const restStop = ex.stop - v.s;
-      if (restStop < LOOK) {
+      // schon über der Linie (ein Schritt ist bei Tempo länger als die Freigabezone): entschieden
+      if (restStop < 0) v.cleared = ex;
+      else if (restStop < LOOK) {
         const why = this.blockedBy(v, ex.conn, restStop);
         if (why) {
           this.noteWait(v, ex.conn, why);
           blocked = true;
           const g = Math.max(0.1, restStop - 0.5);
           if (g < gap) [gap, dv] = [g, v.v];
-        } else if (restStop < 0.5) v.cleared = ex;
+        } else if (restStop < 0.5 + v.v * 0.12) v.cleared = ex; // frei, und im nächsten Schritt schon darüber
       }
     }
     // vorgezogene Haltlinie der nächsten Spur (liegt noch auf dieser Spur, vor einem Übergang)

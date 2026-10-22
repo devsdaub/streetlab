@@ -276,6 +276,28 @@ export const LINE_LABELS: Record<LineStyle, string> = {
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
+/**
+ * Lage der gezeichneten Linie im Querschnitt: Abstand der linken Außenkante nach links (m).
+ * Die Linie liegt in der Mitte der Fahrbahn — Fahrstreifen samt direkt anliegender Rad- und
+ * Parkstreifen —, so wie OSM-Linien und gezeichnete Straßen verlaufen. Ein Gehweg nur auf einer
+ * Seite verschiebt die Fahrbahn also nicht (sonst knickt sie, wo er beginnt). Ohne Fahrstreifen:
+ * Mitte des ganzen Querschnitts.
+ */
+export function leftEdge(profile: { type: StripType; width: number }[]): number {
+  const total = profile.reduce((s, x) => s + x.width, 0);
+  const core = profile.map((s, i) => (s.type === 'drive' || s.type === 'bus' || s.type === 'tram' ? i : -1)).filter((i) => i >= 0);
+  if (!core.length) return total / 2;
+  let first = core[0], last = core[core.length - 1];
+  while (first > 0 && STRIP_TYPES[profile[first - 1].type].carriageway) first--;
+  while (last < profile.length - 1 && STRIP_TYPES[profile[last + 1].type].carriageway) last++;
+  let before = 0, block = 0;
+  profile.forEach((s, i) => {
+    if (i < first) before += s.width;
+    else if (i <= last) block += s.width;
+  });
+  return before + block / 2;
+}
+
 type StripSpec = [StripType, number?, (1 | -1)?, Planting?];
 
 export type PresetCategory = 'Wohnen' | 'Hauptverkehr' | 'ÖPNV' | 'Rad und Fuß' | 'Außerorts';

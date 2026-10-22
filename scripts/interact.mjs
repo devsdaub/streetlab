@@ -10,7 +10,7 @@ const project = {
     profile: [S('sidewalk', 2.5), S('bike', 2, -1), S('drive', 3.25, -1), S('drive', 3.25, 1), S('bike', 2, 1), S('sidewalk', 2.5)] }],
 };
 
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, acceptDownloads: true });
 page.on('pageerror', (e) => console.error('PAGEERROR', e.message));
 await page.addInitScript((p) => localStorage.setItem('streetlab.project.v1', JSON.stringify(p)), project);

@@ -5,7 +5,7 @@
  */
 import { localProjection, offsetPolyline, type Vec } from './geometry';
 import type { JunctionInfo } from './junction';
-import { controlOf, defaultJunction, type Control, type JunctionKind, type LngLat, type Project, type StripType } from './model';
+import { controlOf, defaultJunction, leftEdge, type Control, type JunctionKind, type LngLat, type Project, type StripType } from './model';
 import { networkGraph, nodeKey } from './render';
 
 export type LaneClass = 'car' | 'bike' | 'tram' | 'ped';
@@ -97,8 +97,7 @@ export function buildNetwork(project: Project, junctionInfo: Map<string, Junctio
     const center = seg.center.map(proj.fwd);
     const a = node(seg.start, seg.center[0]);
     const b = node(seg.end, seg.center[seg.center.length - 1]);
-    const total = seg.profile.reduce((s, x) => s + x.width, 0);
-    let left = total / 2;
+    let left = leftEdge(seg.profile);
     const placed = seg.profile.map((s) => {
       const p = { s, l: left, r: left - s.width };
       left -= s.width;
@@ -195,8 +194,42 @@ export function buildNetwork(project: Project, junctionInfo: Map<string, Junctio
       }
     }
   }
+  rerootShortExits(edges, nodes, conns);
   rerootShortArms(edges, nodes, conns);
   return { nodes, edges, conns, toLocal: proj.fwd, toLngLat: proj.inv };
+}
+
+/**
+ * Kurze Ausfahrtsarme: Endet der Fahrweg durch die Kreuzung erst hinter dem Ende der Ausfahrtsspur
+ * (Arm kürzer als der Kreuzungsbereich, dahinter ein Übergang auf eine andere Straße), führt er
+ * direkt auf die Spur danach — sonst würde sein Ende auf das Spurende zurückgezogen und der
+ * Fahrweg liefe ein Stück rückwärts.
+ */
+function rerootShortExits(edges: EdgeDef[], nodes: Map<string, NodeDef>, conns: ConnDef[]) {
+  const edgeById = new Map(edges.map((e) => [e.id, e]));
+  const nodeById = new Map([...nodes.values()].map((n) => [n.id, n]));
+  /** Abstand eines Punkts hinter dem Spurende (> 0 = liegt dahinter) */
+  const beyond = (shape: Vec[], q: Vec) => {
+    const [a, b] = [shape[shape.length - 2], shape[shape.length - 1]];
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    return ((q[0] - b[0]) * (b[0] - a[0]) + (q[1] - b[1]) * (b[1] - a[1])) / l;
+  };
+  for (let round = 0; round < 3; round++) {
+    let changed = false;
+    for (const c of conns) {
+      if (!c.explicit || !c.pts) continue;
+      const e = edgeById.get(c.to);
+      const lane = e?.lanes.find((l) => l.index === c.toLane);
+      if (!e || !lane || lane.shape.length < 2 || nodeById.get(e.to)?.kind !== 'pass') continue;
+      if (beyond(lane.shape, c.pts[c.pts.length - 1]) < 0.5) continue;
+      const next = conns.find((f) => !f.explicit && f.from === c.to && f.fromLane === c.toLane);
+      if (!next) continue;
+      c.to = next.to;
+      c.toLane = next.toLane;
+      changed = true;
+    }
+    if (!changed) break;
+  }
 }
 
 /**

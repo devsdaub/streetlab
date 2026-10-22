@@ -1,7 +1,7 @@
 // Test: großes Projekt (> 5 MB) in IndexedDB speichern und nach Neuladen wiederfinden.
 import { chromium } from 'playwright-core';
 import { ll } from './scenes.mjs';
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.on('pageerror', (e) => console.error('PAGEERROR', e.message));
 let n = 0;

@@ -2,7 +2,7 @@
 import { chromium } from 'playwright-core';
 import { scenes, ll } from './scenes.mjs';
 const out = process.argv[2];
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 page.on('pageerror', (e) => console.error('PAGEERROR', e.message));
 const key = (q) => q[0].toFixed(8) + ',' + q[1].toFixed(8);
@@ -26,7 +26,7 @@ await browser.close();
 
 // ---- Übergang: Radweg davor mit Radweg danach in der Karte verbinden ----
 {
-  const browser2 = await chromium.launch({ channel: 'msedge', headless: true });
+  const browser2 = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
   const pg = await browser2.newPage({ viewport: { width: 1440, height: 900 } });
   pg.on('pageerror', (e) => console.error('PAGEERROR', e.message));
   const u = structuredClone(scenes.user); u.basemap = 'none'; u.view = { center: ll(0, 0), zoom: 19.6 };

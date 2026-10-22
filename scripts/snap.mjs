@@ -2,7 +2,7 @@
 import { chromium } from 'playwright-core';
 import { ll } from './scenes.mjs';
 const out = process.argv[2];
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.on('pageerror', (e) => console.error('PAGEERROR', e.message));
 await page.addInitScript((p) => localStorage.setItem('streetlab.project.v1', JSON.stringify(p)), { version: 1, name: 'Fangtest', basemap: 'none', view: { center: ll(10, 0), zoom: 18 }, roads: [] });

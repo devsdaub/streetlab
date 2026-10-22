@@ -257,3 +257,18 @@ code { font: 11px/1.4 ui-monospace, Consolas, monospace; padding: 1px 5px; borde
 .sim-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; padding: 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); font-size: 12px; }
 .sim-stats div { display: flex; flex-direction: column; gap: 1px; }
 .sim-stats b { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* ---- Fortschrittsbalken (Bestand übernehmen) ---- */
+.progress { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.progress-fill { height: 100%; width: 0; border-radius: 3px; background: var(--accent); transition: width 0.25s ease; }
+/* Warten auf den Server: Streifen laufen, solange noch nichts ankommt */
+.progress-fill.waiting {
+  background: repeating-linear-gradient(-45deg, var(--accent) 0 8px, #7ba4f4 8px 16px);
+  background-size: 22px 22px;
+  animation: progress-wait 0.8s linear infinite;
+}
+@keyframes progress-wait { to { background-position: 22px 0; } }
+
+/* ---- Fang beim Zeichnen: Länge und Fangart am Cursor ---- */
+.snap-label { position: absolute; left: 0; top: 0; display: none; pointer-events: none; z-index: 5; padding: 3px 7px; border-radius: 5px; background: rgba(15, 16, 18, 0.85); color: var(--text); font-size: 12px; white-space: nowrap; border: 1px solid var(--border); }
+.snap-label[data-guide='on'] { border-color: #38bdf8; color: #bae6fd; }

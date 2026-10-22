@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { scenes } from './scenes.mjs';
 const [scene = 'fixtures/mein-stadtteil.json', out = '.'] = process.argv.slice(2);
 const load = () => (scene.endsWith('.json') ? JSON.parse(readFileSync(new URL(scene, import.meta.url), 'utf8')) : structuredClone(scenes[scene]));
-const browser = await chromium.launch({ channel: 'msedge', headless: true });
+const browser = await chromium.launch({ channel: process.env.BROWSER ?? 'msedge', headless: true });
 const errors = [];
 let failed = 0;
 

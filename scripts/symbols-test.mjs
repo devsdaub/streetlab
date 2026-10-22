@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 mkdirSync('scripts/.build', { recursive: true });
 execSync('npx --yes esbuild src/render.ts src/model.ts --bundle --format=esm --platform=node --outdir=scripts/.build --log-level=error', { stdio: 'inherit' });
 const { buildRoad } = await import('./.build/render.js');
-const { PRESETS, presetProfile } = await import('./.build/model.js');
+const { PRESETS, presetProfile, leftEdge } = await import('./.build/model.js');
 const M = 111320;
 let bad = 0;
 PRESETS.forEach((p, i) => {
@@ -12,8 +12,8 @@ PRESETS.forEach((p, i) => {
   const road = { id: 'r', name: '', smooth: false, profile, points: [[0, 0], [200 / M, 0]] };
   const f = buildRoad(road);
   // Spurgrenzen (y in Metern, links positiv)
-  const total = profile.reduce((s, x) => s + x.width, 0);
-  let left = total / 2;
+  // Lage wie in der Darstellung: Linie in der Fahrbahnmitte
+  let left = leftEdge(profile);
   const lanes = profile.map((s) => { const l = left; left -= s.width; return { type: s.type, l, r: left }; });
   for (const ft of f.markings) {
     const ys = ft.geometry.coordinates[0].map(([, lat]) => lat * M);

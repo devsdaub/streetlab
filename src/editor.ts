@@ -3,18 +3,31 @@ import type { Feature } from 'geojson';
 import { EMPTY, SURFACE_LAYERS, setData, setStripHighlight } from './map';
 import type { JunctionInfo } from './junction';
 import type { TransitionInfo } from './render';
-import { cleanPoints, defaultJunction, ensureSection, insertPoint, presetProfile, removePoint, sectionProfile, uid, type LngLat, type Road, type Strip } from './model';
-import { localProjection, type Vec } from './geometry';
+import { cleanPoints, defaultJunction, ensureSection, insertPoint, leftEdge, presetProfile, removePoint, sectionProfile, uid, type LngLat, type Road, type Strip } from './model';
+import { localProjection, tangentArc, type Vec } from './geometry';
 import { nodeKey } from './render';
+import { roadOutline } from './brush';
 import type { Store } from './store';
 import { connectRoad } from './topology';
 
-export type Mode = 'select' | 'draw' | 'split';
+/**
+ * import: Bereich für „Bestand übernehmen“ umfahren (osmimport.ts), section: Abschnitt entlang einer
+ * Straße ziehen (brush.ts) — in beiden gehört die Maus dem jeweiligen Werkzeug. curve: Kreisbogen
+ * mit festem Radius, tangential aus einem Straßenende oder einer gewählten Richtung.
+ */
+export type Mode = 'select' | 'draw' | 'split' | 'import' | 'section' | 'curve' | 'roundabout';
+/** Modi, in denen die Maus einem eigenen Werkzeug gehört (osmimport.ts, brush.ts, roundabout.ts) */
+const EXTERNAL: Mode[] = ['import', 'section', 'roundabout'];
 
 const SNAP_PX = 12;
+
+/** Querversatz der Kante rechts von Streifen k (k = −1: linke Außenkante), + = links */
+const edgeOffset = (profile: Strip[], k: number) => leftEdge(profile) - profile.slice(0, k + 1).reduce((s, x) => s + x.width, 0);
 const DRAFT_ID = '__draft';
 
 type Member = { road: Road; index: number };
+/** Hilfslinie des Richtungsfangs: vom letzten Punkt in Fangrichtung, mit Beschriftung */
+type Guide = { from: LngLat; to: LngLat; label: string };
 
 export class Editor {
   mode: Mode = 'select';
@@ -35,6 +48,8 @@ export class Editor {
   getTransition: (key: string) => TransitionInfo | undefined = () => undefined;
   /** Kreuzungsdaten aus dem letzten Rendern */
   getInfo: (key: string) => JunctionInfo | undefined = () => undefined;
+  /** Fang an/aus (Schalter in der Werkzeugleiste); Alt kehrt ihn jeweils um */
+  snapping = true;
   /** Querschnitt für neu gezeichnete Straßen */
   drawProfile: Strip[] = presetProfile(0);
   /** Selektion oder Modus geändert */
@@ -52,6 +67,13 @@ export class Editor {
   private draft: LngLat[] = [];
   private hover: LngLat | null = null;
   private hoverSnapped = false;
+  private guide: Guide | null = null;
+  /** Kurven-Werkzeug: Anfang und Anfangsrichtung (lokal in m, null = per zweitem Klick wählen) */
+  private curve: { start: LngLat; dir: Vec | null } | null = null;
+  /** Vorschau des Bogens bis zum Cursor */
+  private arc: { pts: LngLat[]; label: string; endDir: Vec } | null = null;
+  /** Länge und Fangart am Cursor beim Zeichnen */
+  private label: HTMLDivElement;
   private drag: { key: string; members: Member[] } | null = null;
   /** ganze Straße verschieben: Ausgangspunkt und ursprüngliche Lage aller bewegten Punkte */
   private roadDrag: { origin: LngLat; start: { x: number; y: number }; moved: boolean; items: { road: Road; index: number; orig: LngLat; key: string }[] } | null = null;
@@ -69,6 +91,9 @@ export class Editor {
   private suppressClickUntil = 0;
 
   constructor(private map: MapLibre, private store: Store) {
+    this.label = document.createElement('div');
+    this.label.className = 'snap-label';
+    map.getContainer().append(this.label);
     map.on('mousedown', 'width-handles', (e) => this.startWidthDrag(e));
     map.on('mousedown', (e) => this.startRoadDrag(e));
     map.on('mousedown', 'edit-vertices', (e) => this.startVertexDrag(e));
@@ -78,9 +103,10 @@ export class Editor {
     map.on('mouseup', () => this.endDrag());
     map.on('click', (e) => this.onClick(e));
     map.on('dblclick', (e) => {
-      if (this.mode !== 'draw') return;
+      if (this.mode !== 'draw' && this.mode !== 'curve') return;
       e.preventDefault();
-      this.finishDraft();
+      if (this.mode === 'draw') this.finishDraft();
+      else this.setMode('select');
     });
     this.enableMiddleButtonPan();
   }
@@ -120,7 +146,11 @@ export class Editor {
     this.onModeChange(mode);
     this.draft = [];
     this.hover = null;
-    if (mode === 'draw') {
+    this.guide = null;
+    this.curve = null;
+    this.arc = null;
+    this.showLabel(null);
+    if (mode === 'draw' || mode === 'curve') {
       this.selectedId = null;
       this.selectedSection = 0;
       this.selectedNode = null;
@@ -160,6 +190,10 @@ export class Editor {
 
   /** Straße, die gerade gezeichnet wird — als Vorschau mit echtem Querschnitt */
   draftRoad(): Road | null {
+    if (this.mode === 'curve') {
+      const pts = this.curveLine();
+      return pts ? { id: DRAFT_ID, name: '', points: pts, profile: this.drawProfile, smooth: true } : null;
+    }
     if (this.mode !== 'draw' || !this.draft.length) return null;
     const points = this.hover ? [...this.draft, this.hover] : this.draft;
     if (points.length < 2) return null;
@@ -229,8 +263,7 @@ export class Editor {
       });
       const h = this.mode === 'select' && !this.laneEdit ? this.widthHandleFrame(road) : null;
       if (h) {
-        const total = h.profile.reduce((s, x) => s + x.width, 0);
-        let off = total / 2;
+        let off = leftEdge(h.profile);
         const at = (o: number) => h.proj.inv([h.p[0] + h.n[0] * o, h.p[1] + h.n[1] * o]);
         const handles = [point(at(off), { k: -1 })];
         h.profile.forEach((x, k) => {
@@ -253,12 +286,25 @@ export class Editor {
 
     this.refreshLaneOverlay();
 
-    const draftPts = this.hover ? [...this.draft, this.hover] : this.draft;
+    const curving = this.mode === 'curve';
+    const draftPts = curving
+      ? [this.curve?.start, this.hover].filter((p): p is LngLat => !!p)
+      : this.hover
+        ? [...this.draft, this.hover]
+        : this.draft;
     const features: Feature[] = draftPts.map((p, i) =>
       point(p, { snap: this.hoverSnapped && i === draftPts.length - 1 && !!this.hover }),
     );
-    if (draftPts.length >= 2)
-      features.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: draftPts } });
+    const line = curving ? this.curveLine() : draftPts.length >= 2 ? draftPts : null;
+    if (line) features.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: line } });
+    // Straße, an die gerade angeschlossen würde, blau umranden
+    const target = (this.mode === 'draw' || curving) && this.hover && this.hoverSnapped ? this.roadAt(this.hover)?.road : undefined;
+    setData(this.map, 'affected', {
+      type: 'FeatureCollection',
+      features: target ? [{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [roadOutline(target)] } }] : [],
+    });
+    if (this.guide && this.hover)
+      features.push({ type: 'Feature', properties: { guide: true }, geometry: { type: 'LineString', coordinates: [this.guide.from, this.guide.to] } });
     setData(this.map, 'draft', { type: 'FeatureCollection', features });
   }
 
@@ -481,8 +527,7 @@ export class Editor {
     if (!h) return;
     this.store.checkpoint();
     const k = f.properties!.k as number;
-    const total = h.profile.reduce((s, x) => s + x.width, 0);
-    const boundary = k < 0 ? total / 2 : total / 2 - h.profile.slice(0, k + 1).reduce((s, x) => s + x.width, 0);
+    const boundary = edgeOffset(h.profile, k);
     this.widthDrag = { road, profile: h.profile, k, origin: h.p, n: h.n, proj: h.proj, widths: h.profile.map((x) => x.width), boundary };
     this.onDragStart(new Set([road.id]));
   }
@@ -513,6 +558,7 @@ export class Editor {
   }
 
   private onMove(e: MapMouseEvent) {
+    if (EXTERNAL.includes(this.mode)) return;
     if (this.roadDrag) {
       if (!this.roadDrag.moved) {
         if (Math.hypot(e.point.x - this.roadDrag.start.x, e.point.y - this.roadDrag.start.y) < 4) return;
@@ -544,14 +590,17 @@ export class Editor {
       const w = this.widthDrag;
       const m = w.proj.fwd(e.lngLat.toArray() as LngLat);
       const o = (m[0] - w.origin[0]) * w.n[0] + (m[1] - w.origin[1]) * w.n[1];
-      // Kante folgt der Maus: bei mittiger Ausrichtung ändert sich die Breite um das Doppelte
-      const delta = w.k < 0 ? 2 * (o - w.boundary) : 2 * (w.boundary - o);
+      // Kante folgt der Maus. Wie stark sie sich mit der Breite bewegt, hängt davon ab, ob der
+      // Streifen zur Fahrbahn gehört (deren Mitte bleibt auf der Linie) — daher ausrechnen
       const i = Math.max(0, w.k);
-      w.profile[i].width = Math.max(0.3, Math.round((w.widths[i] + delta) * 20) / 20);
+      const trial = (width: number) => edgeOffset(w.profile.map((x, j) => ({ ...x, width: j === i ? width : w.widths[j] })), w.k);
+      const slope = trial(w.widths[i] + 1) - trial(w.widths[i]) || 1;
+      const width = w.widths[i] + (o - w.boundary) / slope;
+      w.profile[i].width = Math.max(0.3, Math.round(width * 20) / 20);
       this.store.changed('geometry');
       return;
     }
-    const noSnap = e.originalEvent.altKey;
+    const noSnap = this.noSnap(e);
     if (this.drag) {
       const { members } = this.drag;
       // freies Straßenende (nur eine Straße, erster/letzter Punkt): großzügig einrasten
@@ -565,10 +614,22 @@ export class Editor {
       this.store.changed('geometry');
       return;
     }
-    if (this.mode === 'draw') {
+    if (this.mode === 'curve') {
       const s = noSnap ? { p: e.lngLat.toArray() as LngLat, snapped: false } : this.snap(e.point, e.lngLat.toArray() as LngLat);
       this.hover = s.p;
       this.hoverSnapped = s.snapped;
+      this.arc = this.curveArc(s.p);
+      this.showLabel(e.point);
+      this.refreshOverlays();
+      this.onDraft();
+      return;
+    }
+    if (this.mode === 'draw') {
+      const s = noSnap ? { p: e.lngLat.toArray() as LngLat, snapped: false, guide: null } : this.snapDraw(e.point, e.lngLat.toArray() as LngLat);
+      this.hover = s.p;
+      this.hoverSnapped = s.snapped;
+      this.guide = s.guide;
+      this.showLabel(e.point);
       this.refreshOverlays();
       this.onDraft();
       return;
@@ -613,12 +674,14 @@ export class Editor {
   }
 
   private onClick(e: MapMouseEvent) {
-    if (performance.now() < this.suppressClickUntil) return;
+    if (performance.now() < this.suppressClickUntil || EXTERNAL.includes(this.mode)) return;
     if (this.mode === 'split') return this.splitAt(e);
     if (this.laneClick(e)) return;
+    if (this.mode === 'curve') return this.curveClick(e);
     if (this.mode === 'draw') {
-      const p = e.originalEvent.altKey ? (e.lngLat.toArray() as LngLat) : this.snap(e.point, e.lngLat.toArray() as LngLat).p;
+      const p = this.noSnap(e) ? (e.lngLat.toArray() as LngLat) : this.snapDraw(e.point, e.lngLat.toArray() as LngLat).p;
       this.draft.push(p);
+      this.guide = null;
       this.refreshOverlays();
       this.onDraft();
       return;
@@ -687,7 +750,7 @@ export class Editor {
    * Straßenende. Bestehende Knoten und Zwischenpunkte rasten nur knapp ein, sonst entstehen
    * beim Verschieben ungewollt neue Verbindungen.
    */
-  private snap(px: { x: number; y: number }, fallback: LngLat, skip: Member[] = [], generous = true): { p: LngLat; snapped: boolean } {
+  private snap(px: { x: number; y: number }, fallback: LngLat, skip: Member[] = [], generous = true): { p: LngLat; snapped: boolean; kind?: 'point' | 'line' } {
     const skipped = (r: Road, i: number) => skip.some((s) => s.road === r && s.index === i);
     const roads = this.store.project.roads;
     let best: LngLat | null = null;
@@ -710,7 +773,7 @@ export class Editor {
       });
     }
     this.draft.forEach((p) => consider(p, SNAP_PX));
-    if (best) return { p: [best[0], best[1]], snapped: true };
+    if (best) return { p: [best[0], best[1]], snapped: true, kind: 'point' };
 
     // 2. Mittellinien: nächster Punkt auf einer Strecke, interpoliert in Grad → liegt exakt darauf
     for (const road of roads) {
@@ -730,7 +793,236 @@ export class Editor {
         }
       }
     }
-    return best ? { p: best, snapped: true } : { p: fallback, snapped: false };
+    return best ? { p: best, snapped: true, kind: 'line' } : { p: fallback, snapped: false };
+  }
+
+  /**
+   * Fang beim Zeichnen: zuerst Punkte (Straßenenden, Stützpunkte), dann Richtungen vom letzten
+   * Punkt aus — geradeaus, 90° und 45° zum vorigen Stück bzw. zur Straße, an der begonnen wurde,
+   * parallel oder rechtwinklig zu Straßen in der Nähe. Trifft die Richtung eine Straße, rastet der
+   * Punkt genau auf dem Schnitt ein; sonst wird die Länge auf ganze Meter gerundet.
+   */
+  private snapDraw(px: { x: number; y: number }, fallback: LngLat): { p: LngLat; snapped: boolean; guide: Guide | null } {
+    const base = this.snap(px, fallback);
+    const anchor = this.draft[this.draft.length - 1];
+    if (!anchor || base.kind === 'point') return { ...base, guide: null };
+    const A = this.map.project(anchor);
+    const unit = (x: number, y: number): Vec => {
+      const l = Math.hypot(x, y) || 1;
+      return [x / l, y / l];
+    };
+    const rot = (d: Vec, deg: number): Vec => {
+      const r = (deg * Math.PI) / 180;
+      return [d[0] * Math.cos(r) - d[1] * Math.sin(r), d[0] * Math.sin(r) + d[1] * Math.cos(r)];
+    };
+    const dirs: { d: Vec; label: string }[] = [];
+    const family = (d: Vec, straight: string, square: string, diagonal: string) => {
+      dirs.push({ d, label: straight });
+      for (const s of [90, -90]) dirs.push({ d: rot(d, s), label: square });
+      for (const s of [45, -45]) dirs.push({ d: rot(d, s), label: diagonal });
+    };
+    if (this.draft.length >= 2) {
+      const P = this.map.project(this.draft[this.draft.length - 2]);
+      family(unit(A.x - P.x, A.y - P.y), 'geradeaus', '90°', '45°');
+    } else {
+      // begonnen an einer Straße: Verlängerung am Ende, sonst rechtwinklig abzweigen
+      const at = this.roadAt(anchor);
+      if (at) {
+        const { road, i, t } = at;
+        const [a, b] = [this.map.project(road.points[i]), this.map.project(road.points[i + 1])];
+        const d = unit(b.x - a.x, b.y - a.y);
+        const atStart = i === 0 && t < 1e-6, atEnd = i === road.points.length - 2 && t > 1 - 1e-6;
+        if (atStart || atEnd) family(atEnd ? d : ([-d[0], -d[1]] as Vec), 'Verlängerung', '90° zur Straße', '45° zur Straße');
+        else for (const s of [90, -90, 45, -45, 135, -135]) dirs.push({ d: rot(d, s), label: Math.abs(s) === 90 ? 'rechtwinklig' : '45° zur Straße' });
+      }
+    }
+    // Straßen in Cursornähe: parallel bzw. rechtwinklig dazu
+    for (const road of this.store.project.roads) {
+      for (let i = 0; i < road.points.length - 1; i++) {
+        const [a, b] = [this.map.project(road.points[i]), this.map.project(road.points[i + 1])];
+        const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+        if (l2 < 100) continue;
+        const t = Math.max(0, Math.min(1, ((px.x - a.x) * dx + (px.y - a.y) * dy) / l2));
+        if (Math.hypot(a.x + t * dx - px.x, a.y + t * dy - px.y) > 60) continue;
+        const d = unit(dx, dy);
+        for (const s of [0, 180]) dirs.push({ d: rot(d, s), label: `parallel zu ${road.name}` });
+        for (const s of [90, -90]) dirs.push({ d: rot(d, s), label: `rechtwinklig zu ${road.name}` });
+      }
+    }
+
+    // passendste Richtung: Fangzone wächst mit dem Abstand (etwa 5°), mindestens 6, höchstens 14 px
+    let hit: { d: Vec; label: string; along: number; perp: number } | null = null;
+    for (const { d, label } of dirs) {
+      const vx = px.x - A.x, vy = px.y - A.y;
+      const along = vx * d[0] + vy * d[1];
+      const perp = Math.abs(vx * d[1] - vy * d[0]);
+      if (along < 12 || perp > Math.min(14, Math.max(6, along * 0.09))) continue;
+      if (!hit || perp < hit.perp - 0.5) hit = { d, label, along, perp };
+    }
+    if (!hit) return { ...base, guide: null };
+
+    const mpp = (40075016.686 * Math.cos((anchor[1] * Math.PI) / 180)) / (512 * 2 ** this.map.getZoom());
+    const guide = (along: number, label: string): Guide => ({
+      from: anchor,
+      to: this.map.unproject([A.x + hit!.d[0] * (along + 80), A.y + hit!.d[1] * (along + 80)]).toArray() as LngLat,
+      label,
+    });
+    // Schnitt des Strahls mit einer Straße nahe dem Cursor → exakt auf deren Mittellinie
+    let cross: { p: LngLat; dist: number; along: number } | null = null;
+    for (const road of this.store.project.roads) {
+      for (let i = 0; i < road.points.length - 1; i++) {
+        const [a, b] = [this.map.project(road.points[i]), this.map.project(road.points[i + 1])];
+        const ex = b.x - a.x, ey = b.y - a.y;
+        const den = hit.d[0] * ey - hit.d[1] * ex;
+        if (Math.abs(den) < 1e-6) continue;
+        const wx = a.x - A.x, wy = a.y - A.y;
+        const s = (wx * ey - wy * ex) / den; // entlang des Strahls (px)
+        const t = (wx * hit.d[1] - wy * hit.d[0]) / den; // auf der Straße (0…1)
+        if (s < 12 || t < 0 || t > 1) continue;
+        const dist = Math.hypot(A.x + hit.d[0] * s - px.x, A.y + hit.d[1] * s - px.y);
+        if (dist > 16 || (cross && dist >= cross.dist)) continue;
+        const [p, q] = [road.points[i], road.points[i + 1]];
+        cross = { p: [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t], dist, along: s };
+      }
+    }
+    if (cross) return { p: cross.p, snapped: true, guide: guide(cross.along, `${hit.label} · Anschluss`) };
+
+    // sonst Länge auf ganze Meter
+    const metres = Math.max(1, Math.round(hit.along * mpp));
+    const along = metres / mpp;
+    const p = this.map.unproject([A.x + hit.d[0] * along, A.y + hit.d[1] * along]).toArray() as LngLat;
+    return { p, snapped: true, guide: guide(along, hit.label) };
+  }
+
+  // ---- Kurven-Werkzeug -----------------------------------------------------
+
+  /** Vorschau-Linie: Bogen, oder gerade Linie, solange die Richtung noch gewählt wird */
+  private curveLine(): LngLat[] | null {
+    if (this.arc) return this.arc.pts;
+    return this.curve && this.hover ? [this.curve.start, this.hover] : null;
+  }
+
+  /** Bogen vom Anfang bis `end` mit Beschriftung: Länge · Radius · Winkel zur Zielstraße */
+  private curveArc(end: LngLat): { pts: LngLat[]; label: string; endDir: Vec } | null {
+    if (!this.curve?.dir) return null;
+    const proj = localProjection(this.curve.start);
+    const r = tangentArc([0, 0], this.curve.dir, proj.fwd(end));
+    if (!r || r.length < 1) return null;
+    const parts = [`${Math.round(r.length)} m`, Number.isFinite(r.radius) && r.radius < 5000 ? `r ${Math.round(r.radius)} m` : 'gerade'];
+    // endet auf einer Straße: Winkel zwischen Bogenende und Straße (flach = sanftes Einfädeln)
+    const at = this.roadAt(end);
+    if (at) {
+      const [a, b] = [proj.fwd(at.road.points[at.i]), proj.fwd(at.road.points[at.i + 1])];
+      const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+      const cos = Math.abs((r.endDir[0] * (b[0] - a[0]) + r.endDir[1] * (b[1] - a[1])) / l);
+      parts.push(`∠ ${Math.round((Math.acos(Math.min(1, cos)) * 180) / Math.PI)}°`);
+    }
+    const pts = r.pts.map(proj.inv);
+    pts[0] = this.curve.start;
+    pts[pts.length - 1] = end;
+    return { pts, label: parts.join(' · '), endDir: r.endDir };
+  }
+
+  /** Richtung aus einem Straßenende heraus (nur wenn genau eine Straße dort endet) */
+  private endDirAt(p: LngLat): Vec | null {
+    const key = nodeKey(p);
+    const ends: [LngLat, LngLat][] = [];
+    for (const r of this.store.project.roads) {
+      const n = r.points.length;
+      if (n < 2) continue;
+      if (nodeKey(r.points[0]) === key) ends.push([r.points[1], r.points[0]]);
+      else if (nodeKey(r.points[n - 1]) === key) ends.push([r.points[n - 2], r.points[n - 1]]);
+    }
+    if (ends.length !== 1) return null;
+    const proj = localProjection(p);
+    const [a, b] = ends[0].map(proj.fwd);
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    return l > 0.01 ? [(b[0] - a[0]) / l, (b[1] - a[1]) / l] : null;
+  }
+
+  /** 1. Klick Anfang, (2. Klick Richtung,) dann je Klick ein Bogen — weiter tangential bis Esc */
+  private curveClick(e: MapMouseEvent) {
+    const p = this.noSnap(e) ? (e.lngLat.toArray() as LngLat) : this.snap(e.point, e.lngLat.toArray() as LngLat).p;
+    if (!this.curve) {
+      this.curve = { start: p, dir: this.endDirAt(p) };
+    } else if (!this.curve.dir) {
+      const v = localProjection(this.curve.start).fwd(p);
+      const l = Math.hypot(v[0], v[1]);
+      if (l < 1) return;
+      this.curve.dir = [v[0] / l, v[1] / l];
+    } else {
+      const arc = this.curveArc(p);
+      if (!arc) return;
+      this.store.checkpoint();
+      const road: Road = {
+        id: uid(),
+        name: `Straße ${this.store.project.roads.length + 1}`,
+        points: arc.pts,
+        profile: structuredClone(this.drawProfile).map((s) => ({ ...s, id: uid() })),
+        smooth: true,
+      };
+      this.store.project.roads.push(road);
+      connectRoad(this.store.project.roads, road);
+      this.store.changed('structure');
+      // tangential weiterbauen
+      this.curve = { start: p, dir: arc.endDir };
+    }
+    this.arc = null;
+    this.hover = null;
+    this.showLabel(null);
+    this.refreshOverlays();
+    this.onDraft();
+  }
+
+  /** Fang für dieses Mausereignis aus? (Schalter aus, oder Alt gedrückt — Alt kehrt den Schalter um) */
+  private noSnap(e: MapMouseEvent) {
+    return e.originalEvent.altKey === this.snapping;
+  }
+
+  /** Länge des Stücks vom letzten Punkt bis zum Cursor und die Fangart neben dem Cursor */
+  private showLabel(at: { x: number; y: number } | null) {
+    if (this.mode === 'curve') {
+      const text = this.arc?.label ?? (this.curve && !this.curve.dir ? 'Klick legt die Anfangsrichtung fest' : '');
+      if (!at || !text) {
+        this.label.style.display = 'none';
+        return;
+      }
+      this.label.textContent = text;
+      this.label.dataset.guide = this.arc ? 'on' : '';
+      this.label.style.display = 'block';
+      this.label.style.transform = `translate(${Math.round(at.x + 16)}px, ${Math.round(at.y + 14)}px)`;
+      return;
+    }
+    const anchor = this.draft[this.draft.length - 1];
+    if (!at || !anchor || !this.hover || this.mode !== 'draw') {
+      this.label.style.display = 'none';
+      return;
+    }
+    const k = Math.cos((anchor[1] * Math.PI) / 180);
+    const m = Math.hypot((this.hover[0] - anchor[0]) * 111320 * k, (this.hover[1] - anchor[1]) * 111320);
+    this.label.textContent = `${m.toFixed(m < 10 ? 1 : 0).replace('.', ',')} m${this.guide ? ' · ' + this.guide.label : ''}`;
+    this.label.dataset.guide = this.guide ? 'on' : '';
+    this.label.style.display = 'block';
+    this.label.style.transform = `translate(${Math.round(at.x + 16)}px, ${Math.round(at.y + 14)}px)`;
+  }
+
+  /** Straßenstück, auf dem ein Punkt liegt (Stützpunkt oder auf einer Strecke) */
+  private roadAt(p: LngLat): { road: Road; i: number; t: number } | null {
+    const key = nodeKey(p);
+    for (const road of this.store.project.roads) {
+      const n = road.points.length;
+      for (let i = 0; i < n - 1; i++) {
+        if (nodeKey(road.points[i]) === key) return { road, i, t: 0 };
+        if (nodeKey(road.points[i + 1]) === key) return { road, i, t: 1 };
+        const [a, b] = [road.points[i], road.points[i + 1]];
+        const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+        if (l2 < 1e-18) continue;
+        const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2;
+        if (t <= 0 || t >= 1) continue;
+        if (Math.hypot(a[0] + t * dx - p[0], a[1] + t * dy - p[1]) < 1e-7) return { road, i, t };
+      }
+    }
+    return null;
   }
 }
 

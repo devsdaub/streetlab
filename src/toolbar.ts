@@ -20,7 +20,28 @@ export class Toolbar {
     private store: Store,
     private editor: Editor,
   ) {
+    try {
+      this.editor.snapping = localStorage.getItem('streetlab.snapping') !== '0';
+    } catch {
+      /* kein localStorage: Fang bleibt an */
+    }
     this.render();
+  }
+
+  /** Fang an/aus — bleibt für diesen Browser gespeichert */
+  toggleSnapping() {
+    this.editor.snapping = !this.editor.snapping;
+    try {
+      localStorage.setItem('streetlab.snapping', this.editor.snapping ? '1' : '0');
+    } catch {
+      /* kein localStorage */
+    }
+    this.render();
+  }
+
+  /** gewählte Vorlage — fürs Zeichnen und fürs Abschnitt-Ziehen */
+  currentPreset() {
+    return { strips: presetProfile(this.drawPreset), name: PRESETS[this.drawPreset].name };
   }
 
   /** Knopf mit Vorschau der gewählten Vorlage — öffnet die Galerie */
@@ -40,7 +61,7 @@ export class Toolbar {
   openPicker() {
     this.dock.show(
       presetPicker(
-        'Querschnitt für neue Straße',
+        this.editor.mode === 'section' ? 'Querschnitt für den Abschnitt' : 'Querschnitt für neue Straße',
         this.drawPreset,
         (i) => {
           this.drawPreset = i;
@@ -82,17 +103,30 @@ export class Toolbar {
     };
 
     const drawing = mode === 'draw';
+    const curving = mode === 'curve';
+    const circling = mode === 'roundabout';
+    const painting = mode === 'section';
     const rows: (HTMLElement | null)[] = [
       h(
         'div',
         { class: 'bar' },
         h('div', { class: 'brand' }, 'Streetlab'),
-        h('div', { class: 'tools' }, tool('select', 'select', 'Auswählen (V)'), tool('draw', 'draw', 'Straße zeichnen (D)'), tool('split', 'split', 'Straße teilen (S) – erst eine Straße auswählen', !canSplit)),
+        h('div', { class: 'tools' }, tool('select', 'select', 'Auswählen (V)'), tool('draw', 'draw', 'Straße zeichnen (D)'), tool('curve', 'curve', 'Kurve (K) – Bogen mit festem Radius, am Straßenende tangential'), tool('split', 'split', 'Straße teilen (S) – erst eine Straße auswählen', !canSplit), tool('roundabout', 'roundabout', 'Kreisverkehr (R) – auf eine Kreuzung drücken und Radius aufziehen'), tool('section', 'section', 'Abschnitt ziehen (A) – entlang einer Straße ziehen, dort gilt der gewählte Querschnitt'), tool('import', 'import', 'Bestand übernehmen (B) – Bereich umfahren, Straßen aus OpenStreetMap nachbauen')),
         h(
           'div',
           { class: 'tools' },
           h('button', { class: 'tool', title: 'Rückgängig (Strg+Z)', onclick: () => this.store.undo() }, icon('undo', 18)),
           h('button', { class: 'tool', title: 'Wiederholen (Strg+Y)', onclick: () => this.store.redo() }, icon('redo', 18)),
+          h(
+            'button',
+            {
+              class: 'tool' + (this.editor.snapping ? ' on' : ''),
+              title: this.editor.snapping ? 'Fang ist an (G) – Alt zeichnet frei' : 'Fang ist aus (G) – Alt fängt',
+              'data-action': 'snapping',
+              onclick: () => this.toggleSnapping(),
+            },
+            icon('magnet', 18),
+          ),
         ),
         this.sim
           ? h(
@@ -122,11 +156,19 @@ export class Toolbar {
             'div',
             { class: 'bar sub' },
             this.presetButton(),
-            h('span', { class: 'muted' }, 'Klicken setzt Punkte · Doppelklick oder Enter beendet · Alt: nicht fangen'),
+            h('span', { class: 'muted' }, 'Klicken setzt Punkte · Doppelklick oder Enter beendet · G: Fang an/aus · Alt: umkehren'),
           )
-        : mode === 'split'
+        : circling
+          ? h('div', { class: 'bar sub' }, h('span', { class: 'muted' }, 'Auf eine Kreuzung drücken und nach außen ziehen: Radius des Kreisverkehrs · Klick: 15 m · unter 10 m Mini-Kreisel · Esc beendet'))
+          : curving
+          ? h('div', { class: 'bar sub' }, this.presetButton(), h('span', { class: 'muted' }, 'Am Straßenende beginnen: Bogen läuft tangential heraus · sonst legt der 2. Klick die Richtung fest · Esc beendet'))
+          : painting
+          ? h('div', { class: 'bar sub' }, this.presetButton(), h('span', { class: 'muted' }, 'Auf einer Straße entlangziehen: dort gilt dieser Querschnitt · Esc beendet'))
+          : mode === 'split'
           ? h('div', { class: 'bar sub' }, h('span', { class: 'muted' }, 'Auf die Straße klicken, wo ein neuer Abschnitt beginnen soll · Esc bricht ab'))
-          : null,
+          : mode === 'import'
+            ? h('div', { class: 'bar sub' }, h('span', { class: 'muted' }, 'Mit gedrückter Maustaste den Bereich umfahren, dessen Straßen übernommen werden sollen · Esc bricht ab'))
+            : null,
     ];
     this.root.replaceChildren(...rows.filter((x): x is HTMLElement => !!x));
   }
