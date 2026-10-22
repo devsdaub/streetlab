@@ -75,7 +75,7 @@ map.on('load', () => {
   // höchstens einmal pro Frame neu berechnen — beim Ziehen kommen viele Events
   let pending = false;
   /** Straßen, die gerade gezogen werden, samt Nachbarn (null = keine Bearbeitung) */
-  let active: { show: Set<string>; build: Road[]; nodes: Set<string> } | null = null;
+  let active: { show: Set<string>; build: Set<string>; nodes: Set<string> } | null = null;
   const activeRenderer = new RoadRenderer();
   const opts = () => ({ style: store.project.markingStyle ?? 'de', traffic: !!store.project.traffic, links: store.project.stripLinks });
   const pick = (fc: FeatureCollection, keep: (p: any) => boolean): FeatureCollection => ({
@@ -98,7 +98,8 @@ map.on('load', () => {
     // angezeigt werden nur die gezogenen Straßen und ihre Knoten
     const first = ring(ids);
     const second = ring(first.roads);
-    return { show: ids, build: roadsAll.filter((r) => second.roads.has(r.id)), nodes: first.keys };
+    // Straßen-IDs statt Objekten: die Straßen werden bei jeder Änderung neu abgeleitet
+    return { show: ids, build: second.roads, nodes: first.keys };
   };
 
   const renderRoads = () => {
@@ -109,7 +110,7 @@ map.on('load', () => {
       const t0 = performance.now();
       if (active) {
         // nur die Umgebung der gezogenen Straße neu berechnen und zeigen
-        const part = activeRenderer.build(active.build, store.project.junctions, true, opts());
+        const part = activeRenderer.build(store.project.roads.filter((r) => active!.build.has(r.id)), store.project.junctions, true, opts());
         // Knotenschlüssel hängen an der aktuellen Position — daher je Bild neu bestimmen
         const nodesNow = new Set(store.project.roads.filter((r) => active!.show.has(r.id)).flatMap((r) => r.points.map(nodeKey)));
         const showRoad = (p: any) => (p.roadId && active!.show.has(p.roadId)) || (p.node && nodesNow.has(p.node));

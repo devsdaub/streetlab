@@ -39,6 +39,8 @@ const label = () => page.evaluate(() => [...document.querySelectorAll('.snap-lab
 /** Zahlen aus der Beschriftung (Länge, Radius, Winkel) */
 const nums = (t) => (t.match(/\d+/g) ?? []).map(Number);
 const near = (a, b) => Math.abs(a - b) <= 1; // Cursor liegt auf ganzen Pixeln
+/** Straße, die an diesem Punkt beginnt (neue Straßen haben keine feste Stelle in der Liste: Teilen erzeugt weitere) */
+const startingAt = (rs, q) => rs.find((r) => key(r.points[0]) === key(q));
 const roads = () => page.evaluate(() => window.__streetlab.store.project.roads);
 /** Winkel (°) zwischen Richtung des ersten Stücks einer Straße und d */
 const startAngle = (r, d) => { const [a, b] = [xy(r.points[0]), xy(r.points[1])]; const v = [b[0] - a[0], b[1] - a[1]]; return (Math.acos((v[0] * d[0] + v[1] * d[1]) / Math.hypot(...v) / Math.hypot(...d)) * 180) / Math.PI; };
@@ -54,8 +56,8 @@ check(/^\d+ m · r \d+ m$/.test(l) && near(nums(l)[0], 54) && near(nums(l)[1], 4
 await page.screenshot({ path: `${out}/kurve-1-vorschau.png` });
 await click(40, 30);
 let rs = await roads();
-const c1 = rs[2];
-check(rs.length === 3 && key(c1.points[0]) === key(project.roads[0].points[1]), `Bogen beginnt genau am Straßenende (${rs.length} Straßen)`);
+const c1 = startingAt(rs, project.roads[0].points[1]);
+check(rs.length === 3 && !!c1 && c1.id !== 'A', `Bogen beginnt genau am Straßenende (${rs.length} Straßen)`);
 check(startAngle(c1, [1, 0]) < 5, `tangential heraus (${startAngle(c1, [1, 0]).toFixed(1)}° zur Zufahrt)`);
 
 // 2. hinter dem Anfang (über 180°): kein Bogen, Klick tut nichts
@@ -73,7 +75,9 @@ check(/∠ \d+°$/.test(l) && near(nums(l).at(-1), 37), `Einfädeln mit Winkel: 
 await page.screenshot({ path: `${out}/kurve-2-einfaedeln.png` });
 await click(60, 70);
 rs = await roads();
-const c2 = rs[3], T = rs.find((r) => r.id === 'T');
+const c2 = startingAt(rs, c1.points[c1.points.length - 1]);
+// die Zielstraße wurde am Einmündungspunkt geteilt — beide Teile heißen „Ziel“
+const T = { points: rs.filter((r) => r.name === 'Ziel').flatMap((r) => r.points) };
 const d1 = (() => { const n = c1.points.length; const [a, b] = [xy(c1.points[n - 2]), xy(c1.points[n - 1])]; return [b[0] - a[0], b[1] - a[1]]; })();
 check(startAngle(c2, d1) < 5, `zweiter Bogen schließt tangential an (${startAngle(c2, d1).toFixed(1)}°)`);
 check(T.points.some((p) => key(p) === key(c2.points[c2.points.length - 1])), 'Ende ist mit der Zielstraße verknüpft');
@@ -89,14 +93,16 @@ await click(-40, -50);
 await move(-10, -30);
 l = await label();
 check(/^\d+ m · r \d+ m$/.test(l), `freier Bogen „${l}“`);
+const before = (await roads()).length;
 await click(-10, -30);
 rs = await roads();
-check(rs.length === 5 && startAngle(rs[4], [1, 0]) < 5, `freier Bogen tangential zur gewählten Richtung (${startAngle(rs[4], [1, 0]).toFixed(1)}°)`);
+const free = rs.find((r) => Math.hypot(...xy(r.points[0]).map((v, i) => v - [-60, -50][i])) < 1);
+check(rs.length === before + 1 && !!free && startAngle(free, [1, 0]) < 5, `freier Bogen tangential zur gewählten Richtung (${free ? startAngle(free, [1, 0]).toFixed(1) : '-'}°)`);
 await page.keyboard.press('Escape');
 
 await page.keyboard.press('Control+z');
 await page.waitForTimeout(300);
-check((await roads()).length === 4, 'Strg+Z nimmt den letzten Bogen zurück');
+check((await roads()).length === before, 'Strg+Z nimmt den letzten Bogen zurück');
 await page.waitForTimeout(500);
 await page.screenshot({ path: `${out}/kurve-3-ergebnis.png` });
 

@@ -4,7 +4,7 @@
  * zufällig gleiche Koordinaten. Aus dem Netz werden die bisherigen `Road`-Objekte abgeleitet,
  * mit denen Darstellung, Kreuzungsbau, Spurnetz und Simulation arbeiten.
  */
-import { localProjection, type Vec } from '../geometry';
+import { localProjection, smoothWithIndex, type Vec } from '../geometry';
 import { uid, type JunctionSettings, type LngLat, type Project, type Road, type Section, type Strip } from '../model';
 
 export interface NetNode {
@@ -109,43 +109,103 @@ export function checkNet(net: Net): string[] {
 
 const keyOf = (p: LngLat) => `${p[0].toFixed(8)},${p[1].toFixed(8)}`;
 
+/** Was ein Punkt einer abgeleiteten Straße im Netz ist */
+export type PointRef = { kind: 'a' } | { kind: 'b' } | { kind: 'shape'; i: number } | { kind: 'event' };
+
+/** Abgeleitete Straße eines Straßenzugs samt Punkt-Bezügen */
+export interface DerivedRoad {
+  road: Road;
+  refs: PointRef[];
+  /** Streifen-Zuordnungen an seinen Abschnittsgrenzen (Schlüssel wie Project.stripLinks) */
+  links: Record<string, string>;
+  /** Lage (0…1) der Abschnittsgrenzen, je Punkt-Schlüssel — damit die Rückübernahme nicht neu misst */
+  eventAt: Map<string, number>;
+}
+
 /**
- * Straßen und Knoteneinstellungen im bisherigen Format. Querschnitts-Ereignisse werden zu
- * Abschnitten; liegt ein Ereignis nicht auf einem Stützpunkt, wird dort einer eingefügt (in der
- * abgeleiteten Straße — das Netz bleibt unberührt).
+ * Straße im bisherigen Format für einen Straßenzug. Querschnitts-Ereignisse werden zu Abschnitten;
+ * liegt ein Ereignis nicht (±1 m) auf einem Stützpunkt, wird dort ein Hilfspunkt eingefügt — bei
+ * geglätteten Straßen auf der Kurve, damit sie sich nicht verbiegt (das Netz bleibt unberührt).
  */
-export function toRoads(net: Net): { roads: Road[]; junctions: Record<string, JunctionSettings>; stripLinks: Record<string, string> } {
-  const roads: Road[] = [];
-  const stripLinks: Record<string, string> = {};
-  for (const c of Object.values(net.corridors)) {
-    const points = corridorPoints(net, c).map((p) => [p[0], p[1]] as LngLat);
-    const sections: Section[] = [];
-    for (const ev of c.cross.slice(1)) {
-      let index: number;
-      const m = metres(points);
-      const s = ev.at * m.length;
-      // auf einen Stützpunkt (±1 m) legen, sonst einen einfügen
-      const near = m.cum.findIndex((x) => Math.abs(x - s) < 1);
-      if (near > 0 && near < points.length - 1) index = near;
-      else {
-        const { p, i } = pointAtFraction(points, ev.at);
-        index = i + 1;
-        points.splice(index, 0, p);
-        for (const x of sections) if (x.index >= index) x.index++;
-      }
-      if (sections.some((x) => x.index === index)) continue;
-      sections.push({ index, profile: ev.profile, ...(ev.transition ? { transition: ev.transition } : {}) });
-      for (const [from, to] of Object.entries(ev.links ?? {})) stripLinks[`sec:${c.id}:${index}|${from}`] = to;
-    }
-    sections.sort((x, y) => x.index - y.index);
-    roads.push({ id: c.id, name: c.name, points, profile: c.cross[0].profile, smooth: c.smooth, ...(sections.length ? { sections } : {}), ...(c.speed ? { speed: c.speed } : {}) });
+export function deriveRoad(net: Net, c: Corridor): DerivedRoad {
+  const corner = corridorPoints(net, c);
+  const base = metres(corner);
+  const smooth = c.smooth && corner.length >= 3 ? smoothWithIndex(base.q) : null;
+  /** Punkt bei Lage `at`, auf der geglätteten Kurve bzw. dem Linienzug */
+  const placeAt = (at: number): LngLat => {
+    const { p, i, t } = pointAtFraction(corner, at);
+    if (!smooth) return p;
+    const f = smooth.idx[i] + t * (smooth.idx[i + 1] - smooth.idx[i]);
+    const k = Math.min(smooth.pts.length - 2, Math.floor(f));
+    const u = f - k;
+    const [x, y] = [smooth.pts[k], smooth.pts[k + 1]];
+    return base.proj.inv([x[0] + (y[0] - x[0]) * u, x[1] + (y[1] - x[1]) * u]);
+  };
+  // alle Punkte mit ihrer Bogenlänge: Anfang, Stützpunkte, Hilfspunkte, Ende
+  type Item = { s: number; p: LngLat; ref: PointRef; ev?: CrossEvent };
+  const items: Item[] = corner.map((q, k) => ({
+    s: base.cum[k],
+    p: [q[0], q[1]],
+    ref: k === 0 ? { kind: 'a' } : k === corner.length - 1 ? { kind: 'b' } : { kind: 'shape', i: k - 1 },
+  }));
+  for (const ev of c.cross.slice(1)) {
+    const s = ev.at * base.length;
+    const vertex = items.find((x) => x.ref.kind === 'shape' && !x.ev && Math.abs(x.s - s) < 1);
+    if (vertex) vertex.ev = ev;
+    else if (s > 0.01 && s < base.length - 0.01) items.push({ s, p: placeAt(ev.at), ref: { kind: 'event' }, ev });
   }
+  // stabil sortieren: bei gleicher Lage der Stützpunkt vor dem Hilfspunkt
+  items.sort((x, y) => x.s - y.s || (x.ref.kind === 'event' ? 1 : 0) - (y.ref.kind === 'event' ? 1 : 0));
+  const sections: Section[] = [];
+  const links: Record<string, string> = {};
+  const eventAt = new Map<string, number>();
+  items.forEach((x, index) => {
+    if (!x.ev || index === 0 || index === items.length - 1) return;
+    sections.push({ index, profile: x.ev.profile, ...(x.ev.transition ? { transition: x.ev.transition } : {}) });
+    eventAt.set(keyOf(x.p), x.ev.at);
+    for (const [from, to] of Object.entries(x.ev.links ?? {})) links[`sec:${c.id}:${index}|${from}`] = to;
+  });
+  const road: Road = {
+    id: c.id,
+    name: c.name,
+    points: items.map((x) => x.p),
+    profile: c.cross[0].profile,
+    smooth: c.smooth,
+    ...(sections.length ? { sections } : {}),
+    ...(c.speed ? { speed: c.speed } : {}),
+  };
+  return { road, refs: items.map((x) => x.ref), links, eventAt };
+}
+
+/** Knoteneinstellungen und Zuordnungen an Durchgangsknoten, nach Knotenschlüssel */
+export function deriveNodes(net: Net): { junctions: Record<string, JunctionSettings>; stripLinks: Record<string, string> } {
   const junctions: Record<string, JunctionSettings> = {};
+  const stripLinks: Record<string, string> = {};
   for (const n of Object.values(net.nodes)) {
     if (n.junction) junctions[keyOf(n.pos)] = n.junction;
     for (const [from, to] of Object.entries(n.links ?? {})) stripLinks[`${keyOf(n.pos)}|${from}`] = to;
   }
-  return { roads, junctions, stripLinks };
+  return { junctions, stripLinks };
+}
+
+/** Alle Straßen, Knoteneinstellungen und Streifen-Zuordnungen im bisherigen Format */
+export function toRoads(net: Net): {
+  roads: Road[];
+  junctions: Record<string, JunctionSettings>;
+  stripLinks: Record<string, string>;
+  /** je Straße: was jeder ihrer Punkte im Netz ist */
+  refs: Record<string, PointRef[]>;
+} {
+  const roads: Road[] = [];
+  const refs: Record<string, PointRef[]> = {};
+  const { junctions, stripLinks } = deriveNodes(net);
+  for (const c of Object.values(net.corridors)) {
+    const d = deriveRoad(net, c);
+    roads.push(d.road);
+    refs[c.id] = d.refs;
+    Object.assign(stripLinks, d.links);
+  }
+  return { roads, junctions, stripLinks, refs };
 }
 
 // ---- Umrechnung: bisheriges Projekt → Netz ------------------------------------
@@ -227,6 +287,56 @@ export function addNode(net: Net, pos: LngLat): string {
 
 /** Wo ein neuer Straßenzug beginnt oder endet: an einem Knoten, auf einem Straßenzug, oder frei */
 export type Anchor = { node: string } | { corridor: string; at: number } | { pos: LngLat };
+
+/**
+ * Was liegt bei p im Netz (Abstand bis `tol` Meter)? Ein Knoten, eine Stelle auf einem Straßenzug
+ * (als Lage), sonst nichts. `skipNode` / `skipCorridors` werden übergangen (z. B. der gerade
+ * gezogene Knoten und seine Straßen).
+ */
+export function anchorAt(net: Net, p: LngLat, tol = 0.05, skipNode?: string, skipCorridors?: Set<string>): Anchor {
+  const proj = localProjection(p);
+  for (const n of Object.values(net.nodes)) {
+    if (n.id === skipNode) continue;
+    const q = proj.fwd(n.pos);
+    if (Math.hypot(q[0], q[1]) < tol) return { node: n.id };
+  }
+  for (const c of Object.values(net.corridors)) {
+    if (skipCorridors?.has(c.id)) continue;
+    const pts = corridorPoints(net, c).map(proj.fwd);
+    let acc = 0, total = 0;
+    for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+    for (let i = 1; i < pts.length; i++) {
+      const [a, b] = [pts[i - 1], pts[i]];
+      const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy);
+      if (l > 1e-9) {
+        const t = Math.max(0, Math.min(1, (-a[0] * dx - a[1] * dy) / (l * l)));
+        if (Math.hypot(a[0] + t * dx, a[1] + t * dy) < tol) {
+          const at = (acc + t * l) / (total || 1);
+          if (at * total < 0.5 && c.a !== skipNode) return { node: c.a };
+          if ((1 - at) * total < 0.5 && c.b !== skipNode) return { node: c.b };
+          return { corridor: c.id, at };
+        }
+      }
+      acc += l;
+    }
+  }
+  return { pos: [p[0], p[1]] };
+}
+
+/** Lage (0…1) des Punkts auf dem Linienzug des Straßenzugs, der p am nächsten liegt */
+export function fractionNear(net: Net, cid: string, p: LngLat): number {
+  const m = metres(corridorPoints(net, net.corridors[cid]));
+  const q = m.proj.fwd(p);
+  let best = { d: Infinity, s: 0 };
+  for (let i = 1; i < m.q.length; i++) {
+    const [a, b] = [m.q[i - 1], m.q[i]];
+    const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+    const t = l2 ? Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / l2)) : 0;
+    const d = Math.hypot(a[0] + t * dx - q[0], a[1] + t * dy - q[1]);
+    if (d < best.d) best = { d, s: m.cum[i - 1] + t * Math.sqrt(l2) };
+  }
+  return m.length ? best.s / m.length : 0;
+}
 
 /** Anker auflösen: Knoten verwenden, Straßenzug teilen oder neuen Knoten anlegen */
 export function resolveAnchor(net: Net, a: Anchor): string {
@@ -377,6 +487,97 @@ export function setCross(net: Net, cid: string, at0: number, at1: number, profil
   }
   out[0] = { ...out[0], at: 0 };
   c.cross = out;
+}
+
+/** Abschnittsgrenze an Lage `at` (gleicher Querschnitt, neue Streifen-IDs) — zum Weiterbearbeiten */
+export function addBoundary(net: Net, cid: string, at: number): number {
+  const c = net.corridors[cid];
+  const prev = [...c.cross].reverse().find((e) => e.at <= at)!;
+  if (Math.abs(prev.at - at) < 1e-4) return c.cross.indexOf(prev);
+  const ev: CrossEvent = { at, profile: prev.profile.map((s) => ({ ...structuredClone(s), id: uid() })) };
+  c.cross.push(ev);
+  c.cross.sort((x, y) => x.at - y.at);
+  return c.cross.indexOf(ev);
+}
+
+/**
+ * Kreuzungen eines (neu gezeichneten) Straßenzugs mit anderen: an jedem Schnittpunkt werden beide
+ * geteilt und über einen gemeinsamen Knoten verbunden. Schnitte nahe einem Ende zählen nicht —
+ * dort hat das Einrasten schon entschieden.
+ */
+export function connectCrossings(net: Net, cid: string): number {
+  let made = 0;
+  /** alle Teile der neuen Straße (sie wird an jeder Kreuzung geteilt) */
+  const mine = new Set([cid]);
+  for (let guard = 0; guard < 50; guard++) {
+    let hit: { mineId: string; other: string; atMine: number; atOther: number } | null = null;
+    for (const id of mine) {
+    const c = net.corridors[id];
+    if (!c) continue;
+    const P = corridorPoints(net, c);
+    const proj = localProjection(P[0]);
+    const q = P.map(proj.fwd);
+    for (const o of Object.values(net.corridors)) {
+      if (mine.has(o.id)) continue;
+      const Q = corridorPoints(net, o).map(proj.fwd);
+      const cumP = [0], cumQ = [0];
+      for (let i = 1; i < q.length; i++) cumP.push(cumP[i - 1] + Math.hypot(q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]));
+      for (let i = 1; i < Q.length; i++) cumQ.push(cumQ[i - 1] + Math.hypot(Q[i][0] - Q[i - 1][0], Q[i][1] - Q[i - 1][1]));
+      const [LP, LQ] = [cumP[cumP.length - 1], cumQ[cumQ.length - 1]];
+      for (let i = 1; i < q.length && !hit; i++)
+        for (let j = 1; j < Q.length && !hit; j++) {
+          const [a, b, c2, d] = [q[i - 1], q[i], Q[j - 1], Q[j]];
+          const r = [b[0] - a[0], b[1] - a[1]], s = [d[0] - c2[0], d[1] - c2[1]];
+          const den = r[0] * s[1] - r[1] * s[0];
+          if (Math.abs(den) < 1e-9) continue;
+          const w = [c2[0] - a[0], c2[1] - a[1]];
+          const t = (w[0] * s[1] - w[1] * s[0]) / den, u = (w[0] * r[1] - w[1] * r[0]) / den;
+          if (t < 0 || t > 1 || u < 0 || u > 1) continue;
+          const sP = cumP[i - 1] + t * Math.hypot(r[0], r[1]), sQ = cumQ[j - 1] + u * Math.hypot(s[0], s[1]);
+          // an den Enden (Einrasten) oder an einem gemeinsamen Knoten: keine neue Kreuzung
+          if (sP < 1 || sP > LP - 1 || sQ < 1 || sQ > LQ - 1) continue;
+          hit = { mineId: id, other: o.id, atMine: sP / LP, atOther: sQ / LQ };
+        }
+      if (hit) break;
+    }
+    if (hit) break;
+    }
+    if (!hit) break;
+    const k1 = splitCorridor(net, hit.other, hit.atOther);
+    const before = new Set(Object.keys(net.corridors));
+    const k2 = splitCorridor(net, hit.mineId, hit.atMine);
+    for (const id of Object.keys(net.corridors)) if (!before.has(id)) mine.add(id);
+    // beide Teilpunkte auf denselben Knoten (Position des ersten, er liegt auf der bestehenden Straße)
+    mergeNodes(net, k1, k2);
+    made++;
+  }
+  return made;
+}
+
+/**
+ * Straßen im bisherigen Format ins Netz übernehmen (z. B. aus dem OSM-Import). Endpunkte und
+ * gemeinsame Punkte werden zu Knoten; liegt ein Knoten des Netzes exakt dort, wird er verwendet.
+ */
+export function absorbRoads(net: Net, p: Pick<Project, 'roads' | 'junctions' | 'stripLinks'>): string[] {
+  const add = fromProject(p);
+  const byKey = new Map(Object.values(net.nodes).map((n) => [keyOf(n.pos), n.id]));
+  const rename = new Map<string, string>();
+  for (const n of Object.values(add.nodes)) {
+    const existing = byKey.get(keyOf(n.pos));
+    if (existing) {
+      rename.set(n.id, existing);
+      if (n.junction && !net.nodes[existing].junction) net.nodes[existing].junction = n.junction;
+    } else net.nodes[n.id] = n;
+  }
+  const ids: string[] = [];
+  for (const c of Object.values(add.corridors)) {
+    c.a = rename.get(c.a) ?? c.a;
+    c.b = rename.get(c.b) ?? c.b;
+    if (net.corridors[c.id]) c.id = uid();
+    net.corridors[c.id] = c;
+    ids.push(c.id);
+  }
+  return ids;
 }
 
 /** Ganzen Straßenzug verschieben (samt seiner Knoten — angehängte Straßen ziehen mit) */

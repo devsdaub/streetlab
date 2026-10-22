@@ -160,6 +160,11 @@ export interface Project {
   traffic?: boolean;
   /** Einstellungen je Knotenpunkt, Schlüssel = nodeKey */
   junctions?: Record<string, JunctionSettings>;
+  /**
+   * Straßennetz mit Knoten-IDs — die Wahrheit. `roads`, `junctions` und `stripLinks` werden
+   * daraus abgeleitet (siehe Store); ältere Projekte ohne Netz werden beim Laden umgerechnet.
+   */
+  net?: import('./core/net').Net;
 }
 
 export type MarkingStyle = 'de' | 'us';

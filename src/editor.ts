@@ -3,12 +3,24 @@ import type { Feature } from 'geojson';
 import { EMPTY, SURFACE_LAYERS, setData, setStripHighlight } from './map';
 import type { JunctionInfo } from './junction';
 import type { TransitionInfo } from './render';
-import { cleanPoints, defaultJunction, ensureSection, insertPoint, leftEdge, presetProfile, removePoint, sectionProfile, uid, type LngLat, type Road, type Strip } from './model';
+import { defaultJunction, leftEdge, presetProfile, sectionProfile, type LngLat, type Road, type Strip } from './model';
 import { localProjection, tangentArc, type Vec } from './geometry';
 import { nodeKey } from './render';
 import { roadOutline } from './brush';
 import type { Store } from './store';
-import { connectRoad } from './topology';
+import {
+  addBoundary,
+  addCorridor,
+  anchorAt,
+  connectCrossings,
+  corridorsAt,
+  detachEnd,
+  mergeNodes,
+  moveNode,
+  resolveAnchor,
+  splitCorridor,
+  type Anchor,
+} from './core/net';
 
 /**
  * import: Bereich für „Bestand übernehmen“ umfahren (osmimport.ts), section: Abschnitt entlang einer
@@ -26,6 +38,8 @@ const edgeOffset = (profile: Strip[], k: number) => leftEdge(profile) - profile.
 const DRAFT_ID = '__draft';
 
 type Member = { road: Road; index: number };
+/** was gerade gezogen wird: ein Knoten (mit allen Straßenenden) oder ein Stützpunkt einer Straße */
+type NetDrag = { kind: 'node'; id: string } | { kind: 'shape'; cid: string; i: number };
 /** Hilfslinie des Richtungsfangs: vom letzten Punkt in Fangrichtung, mit Beschriftung */
 type Guide = { from: LngLat; to: LngLat; label: string };
 
@@ -74,9 +88,18 @@ export class Editor {
   private arc: { pts: LngLat[]; label: string; endDir: Vec } | null = null;
   /** Länge und Fangart am Cursor beim Zeichnen */
   private label: HTMLDivElement;
-  private drag: { key: string; members: Member[] } | null = null;
+  private drag: (NetDrag & { start: { x: number; y: number }; moved: boolean }) | null = null;
   /** ganze Straße verschieben: Ausgangspunkt und ursprüngliche Lage aller bewegten Punkte */
-  private roadDrag: { origin: LngLat; start: { x: number; y: number }; moved: boolean; items: { road: Road; index: number; orig: LngLat; key: string }[] } | null = null;
+  private roadDrag: {
+    cid: string;
+    origin: LngLat;
+    start: { x: number; y: number };
+    moved: boolean;
+    detach: boolean;
+    /** Ausgangslage der bewegten Stützpunkte und Knoten */
+    shape: LngLat[];
+    nodes: Map<string, LngLat>;
+  } | null = null;
   /** Streifenbreite an einer Kante ziehen */
   private widthDrag: {
     road: Road;
@@ -208,19 +231,25 @@ export class Editor {
     this.hover = null;
     if (pts.length >= 2) {
       this.store.checkpoint();
-      const road: Road = {
-        id: uid(),
-        name: `Straße ${this.store.project.roads.length + 1}`,
-        points: pts,
-        profile: structuredClone(this.drawProfile).map((s) => ({ ...s, id: uid() })),
-        smooth: true,
-      };
-      this.store.project.roads.push(road);
-      connectRoad(this.store.project.roads, road);
-      this.store.changed('structure');
-      this.selectedId = road.id;
+      this.selectedId = this.addRoad(pts[0], pts.slice(1, -1), pts[pts.length - 1]);
+      this.store.netChanged('structure');
     }
     this.setMode('select');
+  }
+
+  /**
+   * Neue Straße ins Netz: Anfang und Ende hängen an Knoten bzw. teilen die Straße, auf der sie
+   * liegen (ausdrücklich, statt Punkte in fremde Straßen einzufügen); Kreuzungen mit anderen
+   * Straßen werden als Knoten angelegt.
+   */
+  private addRoad(first: LngLat, inner: LngLat[], last: LngLat): string {
+    const net = this.store.project.net;
+    const a = resolveAnchor(net, anchorAt(net, first));
+    // das Ende erst jetzt suchen — der Anfang kann eine Straße geteilt haben
+    const end: Anchor = anchorAt(net, last);
+    const id = addCorridor(net, { node: a }, inner, 'node' in end && end.node === a ? { pos: last } : end, this.drawProfile, `Straße ${Object.keys(net.corridors).length + 1}`);
+    connectCrossings(net, id);
+    return id;
   }
 
   /** Esc: erst Werkzeug beenden, dann Spurbearbeitung, dann Auswahl aufheben */
@@ -257,9 +286,11 @@ export class Editor {
         features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: road.points } }],
       });
       const starts = new Set((road.sections ?? []).map((x) => x.index));
+      // Griffe nur für Knoten und Stützpunkte (Hilfspunkte an Abschnittsgrenzen liegen im Netz nicht vor)
+      const refs = this.store.refs[road.id] ?? [];
       setData(this.map, 'edit-vertices', {
         type: 'FeatureCollection',
-        features: road.points.map((p, index) => point(p, { index, section: starts.has(index) })),
+        features: road.points.map((p, index) => ({ p, index })).filter(({ index }) => refs[index]?.kind !== 'event').map(({ p, index }) => point(p, { index, section: starts.has(index) })),
       });
       const h = this.mode === 'select' && !this.laneEdit ? this.widthHandleFrame(road) : null;
       if (h) {
@@ -428,59 +459,71 @@ export class Editor {
     const f = e.features?.[0];
     if (this.mode !== 'select' || !f || e.originalEvent.button !== 0) return;
     const index = f.properties!.index as number;
-    const road = this.store.road(this.selectedId);
-    const p = index < 0 ? (this.selectedNode && this.nodePoint(this.selectedNode)) : road?.points[index];
-    if (!p) return;
+    const net = this.store.project.net;
+    let target: NetDrag | null = null;
+    if (index < 0) {
+      const id = this.selectedNode && this.store.nodeAt(this.selectedNode);
+      if (id) target = { kind: 'node', id };
+    } else if (this.selectedId) {
+      const ref = this.store.pointRef(this.selectedId, index);
+      const c = net.corridors[this.selectedId];
+      if (ref && c && (ref.kind === 'a' || ref.kind === 'b')) target = { kind: 'node', id: c[ref.kind] };
+      else if (ref?.kind === 'shape') target = { kind: 'shape', cid: c.id, i: ref.i };
+    }
+    if (!target) return;
     e.preventDefault();
     this.store.checkpoint();
-    // Alt: nur den Punkt der gewählten Straße bewegen — löst ihn vom Knoten
-    if (e.originalEvent.altKey && road && index >= 0) this.startDrag(p, [{ road, index }]);
-    else this.startDrag(p);
-  }
-
-  /** Ein Knotenpunkt gehört allen Straßen, die ihn teilen — sie werden gemeinsam verschoben. */
-  private startDrag(p: LngLat, only?: Member[]) {
-    const key = nodeKey(p);
-    const members: Member[] = only ?? [];
-    if (!only) {
-      for (const r of this.store.project.roads) {
-        r.points.forEach((q, i) => {
-          if (nodeKey(q) === key) members.push({ road: r, index: i });
-        });
-      }
+    // Alt: nur diese Straße vom Knoten lösen und ihr Ende allein bewegen
+    if (e.originalEvent.altKey && target.kind === 'node' && this.selectedId && index >= 0 && corridorsAt(net, target.id).length > 1) {
+      const c = net.corridors[this.selectedId];
+      const end = c.a === target.id ? 'a' : 'b';
+      target = { kind: 'node', id: detachEnd(net, c.id, end, 0.01) };
     }
-    this.drag = { key, members };
-    this.onDragStart(new Set(members.map((m) => m.road.id)));
+    this.startDrag(target, e.point);
   }
 
+  private startDrag(target: NetDrag, at: { x: number; y: number }) {
+    this.drag = { ...target, start: { x: at.x, y: at.y }, moved: false };
+    const net = this.store.project.net;
+    const ids = target.kind === 'node' ? corridorsAt(net, target.id).map((c) => c.id) : [target.cid];
+    this.onDragStart(new Set(ids));
+  }
+
+  /** Mittelpunkt einer Strecke ziehen: neuer Stützpunkt der Straße an dieser Stelle */
   private startMidpointDrag(e: MapLayerMouseEvent) {
     const f = e.features?.[0];
-    const road = this.store.road(this.selectedId);
-    if (this.mode !== 'select' || !f || !road || e.originalEvent.button !== 0) return;
+    if (this.mode !== 'select' || !f || !this.selectedId || e.originalEvent.button !== 0) return;
+    const c = this.store.project.net.corridors[this.selectedId];
+    const refs = this.store.refs[this.selectedId];
+    if (!c || !refs) return;
     e.preventDefault();
     this.store.checkpoint();
-    const index = f.properties!.index + 1;
-    insertPoint(road, index, e.lngLat.toArray() as LngLat);
-    this.startDrag(road.points[index]);
-    this.store.changed('geometry');
+    // Stützpunkte vor der Strecke zählen (Hilfspunkte an Abschnittsgrenzen sind keine)
+    const index = f.properties!.index as number;
+    const pos = refs.slice(0, index + 1).filter((r) => r.kind === 'shape').length;
+    c.shape.splice(pos, 0, e.lngLat.toArray() as LngLat);
+    this.store.netChanged('geometry', undefined, [c.id]);
+    this.startDrag({ kind: 'shape', cid: c.id, i: pos }, e.point);
   }
 
+  /** Rechtsklick auf einen Punkt: Stützpunkt entfernen bzw. freies Ende auf den nächsten Punkt kürzen */
   private deleteVertex(e: MapLayerMouseEvent) {
-    const road = this.store.road(this.selectedId);
     const f = e.features?.[0];
-    if (!road || !f || road.points.length <= 2) return;
+    if (!f || !this.selectedId) return;
+    const net = this.store.project.net;
+    const c = net.corridors[this.selectedId];
+    const ref = this.store.pointRef(this.selectedId, f.properties!.index as number);
+    if (!c || !ref) return;
     e.preventDefault();
-    this.store.checkpoint();
-    removePoint(road, f.properties!.index);
-    this.store.changed('geometry');
-  }
-
-  /** Kreuzungseinstellungen wandern mit, wenn ein Knoten verschoben wird */
-  private rekey(from: string, to: string) {
-    const j = this.store.project.junctions;
-    if (from === to || !j?.[from]) return;
-    j[to] = j[from];
-    delete j[from];
+    if (ref.kind === 'shape') {
+      this.store.checkpoint();
+      c.shape.splice(ref.i, 1);
+    } else if ((ref.kind === 'a' || ref.kind === 'b') && c.shape.length && corridorsAt(net, c[ref.kind]).length === 1) {
+      this.store.checkpoint();
+      const q = ref.kind === 'a' ? c.shape.shift()! : c.shape.pop()!;
+      moveNode(net, c[ref.kind], q);
+    } else return;
+    this.store.netChanged('geometry');
   }
 
   /** Klick auf die Fläche der gewählten Straße und ziehen: ganze Straße verschieben */
@@ -494,27 +537,16 @@ export class Editor {
       [p.x + 2, p.y + 2],
     ];
     const road = this.store.road(this.selectedId);
+    const c = this.store.project.net.corridors[this.selectedId];
     // auch die Kreuzungsflächen an den Knoten der gewählten Straße gehören zum Greifbereich
     const nodes = new Set(road?.points.map((q) => nodeKey(q)));
     const hit = this.map
       .queryRenderedFeatures(box, { layers: SURFACE_LAYERS })
       .find((f) => f.properties?.roadId === this.selectedId || (f.properties?.node && nodes.has(f.properties.node)));
-    if (!hit || !road) return;
+    if (!hit || !road || !c) return;
     e.preventDefault();
-    const detach = e.originalEvent.altKey;
-    const items: { road: Road; index: number; orig: LngLat; key: string }[] = [];
-    road.points.forEach((q, index) => {
-      const key = nodeKey(q);
-      items.push({ road, index, orig: [q[0], q[1]], key });
-      // angeschlossene Straßen bleiben verbunden (ihre Knotenpunkte wandern mit), außer mit Alt
-      if (detach) return;
-      for (const r of this.store.project.roads) {
-        if (r === road) continue;
-        r.points.forEach((x, i) => nodeKey(x) === key && items.push({ road: r, index: i, orig: [x[0], x[1]], key }));
-      }
-    });
     // erst ab 4 px Bewegung wird verschoben — ein einfacher Klick wählt weiter einen Streifen
-    this.roadDrag = { origin: e.lngLat.toArray() as LngLat, start: { x: p.x, y: p.y }, moved: false, items };
+    this.roadDrag = { cid: c.id, origin: e.lngLat.toArray() as LngLat, start: { x: p.x, y: p.y }, moved: false, detach: e.originalEvent.altKey, shape: [], nodes: new Map() };
   }
 
   /** Griff an einer Streifenkante: Breite ändern, die Kante folgt der Maus */
@@ -560,30 +592,26 @@ export class Editor {
   private onMove(e: MapMouseEvent) {
     if (EXTERNAL.includes(this.mode)) return;
     if (this.roadDrag) {
-      if (!this.roadDrag.moved) {
-        if (Math.hypot(e.point.x - this.roadDrag.start.x, e.point.y - this.roadDrag.start.y) < 4) return;
-        this.roadDrag.moved = true;
+      const rd = this.roadDrag;
+      const net = this.store.project.net;
+      const c = net.corridors[rd.cid];
+      if (!rd.moved) {
+        if (Math.hypot(e.point.x - rd.start.x, e.point.y - rd.start.y) < 4) return;
+        rd.moved = true;
         this.store.checkpoint();
+        // Alt: angeschlossene Straßen bleiben, wo sie sind — diese Straße bekommt eigene Enden
+        if (rd.detach) for (const end of ['a', 'b'] as const) if (corridorsAt(net, c[end]).length > 1) detachEnd(net, c.id, end, 0.01);
+        rd.shape = c.shape.map((q) => [q[0], q[1]] as LngLat);
+        for (const k of [c.a, c.b]) rd.nodes.set(k, [...net.nodes[k].pos] as LngLat);
         this.map.getCanvas().style.cursor = 'grabbing';
-        this.onDragStart(new Set(this.roadDrag.items.map((x) => x.road.id)));
+        const touched = new Set([c.id, ...[c.a, c.b].flatMap((k) => corridorsAt(net, k).map((x) => x.id))]);
+        this.onDragStart(touched);
       }
       const [lng, lat] = e.lngLat.toArray();
-      const [dx, dy] = [lng - this.roadDrag.origin[0], lat - this.roadDrag.origin[1]];
-      const keys = new Map<string, string>();
-      for (const it of this.roadDrag.items) {
-        it.road.points[it.index] = [it.orig[0] + dx, it.orig[1] + dy];
-        keys.set(it.key, nodeKey(it.road.points[it.index]));
-      }
-      // Kreuzungseinstellungen wandern mit
-      for (const it of this.roadDrag.items) {
-        const now = keys.get(it.key)!;
-        if (now !== it.key) {
-          this.rekey(it.key, now);
-          it.key = now;
-          it.orig = [it.road.points[it.index][0] - dx, it.road.points[it.index][1] - dy];
-        }
-      }
-      this.store.changed('geometry');
+      const [dx, dy] = [lng - rd.origin[0], lat - rd.origin[1]];
+      c.shape = rd.shape.map((q) => [q[0] + dx, q[1] + dy] as LngLat);
+      for (const [k, q] of rd.nodes) moveNode(net, k, [q[0] + dx, q[1] + dy]);
+      this.store.netChanged('geometry', undefined, [c.id, ...[c.a, c.b].flatMap((k) => corridorsAt(net, k).map((x) => x.id))]);
       return;
     }
     if (this.widthDrag) {
@@ -597,21 +625,27 @@ export class Editor {
       const slope = trial(w.widths[i] + 1) - trial(w.widths[i]) || 1;
       const width = w.widths[i] + (o - w.boundary) / slope;
       w.profile[i].width = Math.max(0.3, Math.round(width * 20) / 20);
-      this.store.changed('geometry');
+      // der Querschnitt ist dasselbe Objekt wie im Netz — nur diese Straße neu ableiten
+      this.store.netChanged('geometry', undefined, [w.road.id]);
       return;
     }
     const noSnap = this.noSnap(e);
     if (this.drag) {
-      const { members } = this.drag;
-      // freies Straßenende (nur eine Straße, erster/letzter Punkt): großzügig einrasten
-      const free = members.length === 1 && (members[0].index === 0 || members[0].index === members[0].road.points.length - 1);
-      const p = noSnap ? (e.lngLat.toArray() as LngLat) : this.snap(e.point, e.lngLat.toArray() as LngLat, members, free).p;
-      for (const m of members) m.road.points[m.index] = [p[0], p[1]];
-      const key = nodeKey(p);
-      this.rekey(this.drag.key, key);
-      if (this.selectedNode === this.drag.key) this.selectedNode = key;
-      this.drag.key = key;
-      this.store.changed('geometry');
+      const d = this.drag;
+      if (!d.moved && Math.hypot(e.point.x - d.start.x, e.point.y - d.start.y) < 2) return;
+      d.moved = true;
+      const net = this.store.project.net;
+      // nicht auf sich selbst einrasten: Punkte des gezogenen Knotens bzw. Stützpunkts übergehen
+      const skip = this.dragMembers();
+      // freies Straßenende (nur eine Straße): großzügig einrasten
+      const free = d.kind === 'node' && corridorsAt(net, d.id).length === 1;
+      const p = noSnap ? (e.lngLat.toArray() as LngLat) : this.snap(e.point, e.lngLat.toArray() as LngLat, skip, free).p;
+      const wasSelected = d.kind === 'node' && this.selectedNode === nodeKey(net.nodes[d.id].pos);
+      if (d.kind === 'node') moveNode(net, d.id, p);
+      else net.corridors[d.cid].shape[d.i] = [p[0], p[1]];
+      if (wasSelected && d.kind === 'node') this.selectedNode = nodeKey(p);
+      // nur die betroffenen Straßenzüge neu ableiten — große Netze bleiben flüssig
+      this.store.netChanged('geometry', undefined, d.kind === 'node' ? corridorsAt(net, d.id).map((c) => c.id) : [d.cid]);
       return;
     }
     if (this.mode === 'curve') {
@@ -661,16 +695,42 @@ export class Editor {
       return;
     }
     if (!this.drag) return;
-    const road = this.drag.members[0]?.road;
+    const d = this.drag;
     this.drag = null;
     this.onDragEnd();
+    if (!d.moved) return;
     this.suppressClickUntil = performance.now() + 100;
-    // Punkt auf einen Nachbarpunkt gezogen: doppelte Punkte (Stücke ohne Länge) entfernen
-    let cleaned = false;
-    for (const r of this.store.project.roads) cleaned = cleanPoints(r) || cleaned;
-    // nur einrasten lassen, keine neuen Kreuzungen durch das Ziehen
-    if ((road && connectRoad(this.store.project.roads, road, false)) || cleaned) this.store.changed('structure');
-    else this.onChange();
+    // Knoten auf einen anderen Knoten oder eine Straße gezogen: ausdrücklich verbinden
+    // (nur einrasten — neue Kreuzungen entstehen beim Ziehen nicht)
+    if (d.kind === 'node') {
+      const net = this.store.project.net;
+      const own = new Set(corridorsAt(net, d.id).map((c) => c.id));
+      const there = anchorAt(net, net.nodes[d.id].pos, 0.05, d.id, own);
+      if ('node' in there) mergeNodes(net, there.node, d.id);
+      else if ('corridor' in there) mergeNodes(net, splitCorridor(net, there.corridor, there.at), d.id);
+      if (!('pos' in there) && this.selectedNode) this.selectedNode = null;
+    }
+    this.store.netChanged('structure');
+  }
+
+  /** Punkte der abgeleiteten Straßen, die gerade gezogen werden (für das Einrasten übergehen) */
+  private dragMembers(): Member[] {
+    const d = this.drag;
+    if (!d) return [];
+    const net = this.store.project.net;
+    const out: Member[] = [];
+    for (const r of this.store.project.roads) {
+      const refs = this.store.refs[r.id] ?? [];
+      const c = net.corridors[r.id];
+      refs.forEach((ref, index) => {
+        const hit =
+          d.kind === 'node'
+            ? (ref.kind === 'a' && c.a === d.id) || (ref.kind === 'b' && c.b === d.id)
+            : r.id === d.cid && ref.kind === 'shape' && ref.i === d.i;
+        if (hit) out.push({ road: r, index });
+      });
+    }
+    return out;
   }
 
   private onClick(e: MapMouseEvent) {
@@ -711,24 +771,17 @@ export class Editor {
       if (d < best.d) best = { d, i, t };
     }
     if (best.i < 0) return;
-    this.store.checkpoint();
     const [a, b] = [road.points[best.i], road.points[best.i + 1]];
-    const near = (p: typeof a) => {
-      const q = this.map.project(p);
-      return Math.hypot(q.x - px.x, q.y - px.y) < 10;
-    };
-    let index: number;
-    if (near(a)) index = best.i;
-    else if (near(b)) index = best.i + 1;
-    else {
-      index = best.i + 1;
-      insertPoint(road, index, [a[0] + (b[0] - a[0]) * best.t, a[1] + (b[1] - a[1]) * best.t]);
-    }
-    if (index <= 0 || index >= road.points.length - 1) return this.setMode('select');
-    this.selectedSection = ensureSection(road, index);
+    const net = this.store.project.net;
+    const c = net.corridors[road.id];
+    const there = anchorAt(net, [a[0] + (b[0] - a[0]) * best.t, a[1] + (b[1] - a[1]) * best.t], 0.05, undefined, new Set(Object.keys(net.corridors).filter((id) => id !== road.id)));
+    if (!c || !('corridor' in there)) return this.setMode('select');
+    this.store.checkpoint();
+    // Abschnittsgrenze an der Lage — es werden keine Stützpunkte eingefügt
+    this.selectedSection = addBoundary(net, c.id, there.at);
     this.mode = 'select';
     this.map.getCanvas().style.cursor = '';
-    this.store.changed('structure');
+    this.store.netChanged('structure');
     this.refreshOverlays();
     this.onChange();
   }
@@ -954,16 +1007,8 @@ export class Editor {
       const arc = this.curveArc(p);
       if (!arc) return;
       this.store.checkpoint();
-      const road: Road = {
-        id: uid(),
-        name: `Straße ${this.store.project.roads.length + 1}`,
-        points: arc.pts,
-        profile: structuredClone(this.drawProfile).map((s) => ({ ...s, id: uid() })),
-        smooth: true,
-      };
-      this.store.project.roads.push(road);
-      connectRoad(this.store.project.roads, road);
-      this.store.changed('structure');
+      this.addRoad(arc.pts[0], arc.pts.slice(1, -1), arc.pts[arc.pts.length - 1]);
+      this.store.netChanged('structure');
       // tangential weiterbauen
       this.curve = { start: p, dir: arc.endDir };
     }

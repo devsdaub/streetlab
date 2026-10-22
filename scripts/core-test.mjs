@@ -134,5 +134,27 @@ const { roads } = N.toRoads(net);
 const e1 = roads.find((r) => r.id === s1).points.at(-1), e2 = roads.find((r) => r.id === s2).points[0];
 check(e1[0] === e2[0] && e1[1] === e2[1], 'abgeleitete Straßen: gemeinsamer Punkt am Knoten');
 
+// Neue Straße kreuzt zwei bestehende: beide werden geteilt, je ein gemeinsamer Knoten
+net = N.emptyNet();
+const h1 = N.addCorridor(net, { pos: ll(-50, 0) }, [], { pos: ll(50, 0) }, prof, 'H1');
+const h2 = N.addCorridor(net, { pos: ll(-50, 40) }, [], { pos: ll(50, 40) }, prof, 'H2');
+const v = N.addCorridor(net, { pos: ll(0, -30) }, [ll(0, 20)], { pos: ll(0, 70) }, prof, 'V');
+const made = N.connectCrossings(net, v);
+ok(net, 'Kreuzungen beim Zeichnen');
+const degree = (id) => N.corridorsAt(net, id).length;
+const crossings = Object.values(net.nodes).filter((n) => degree(n.id) === 4);
+check(made === 2 && crossings.length === 2, `zwei Kreuzungen mit je vier Armen (${made} angelegt, ${crossings.length} gefunden)`);
+check(crossings.every((n) => Math.abs(xy(n.pos)[0]) < 0.01) && crossings.map((n) => Math.round(xy(n.pos)[1])).sort((a, b) => a - b).join() === '0,40', `Kreuzungen an (0,0) und (0,40): ${crossings.map((n) => xy(n.pos).map((x) => x.toFixed(1))).join(' / ')}`);
+check(Object.keys(net.corridors).length === 7, `sieben Straßenzüge (${Object.keys(net.corridors).length})`);
+void h1, h2;
+
+// Straßen aus dem alten Format übernehmen: gemeinsamer Endpunkt → vorhandener Knoten
+net = N.emptyNet();
+const base = N.addCorridor(net, { pos: ll(0, 0) }, [], { pos: ll(50, 0) }, prof, 'Bestand');
+const endPos = net.nodes[net.corridors[base].b].pos;
+const ids = N.absorbRoads(net, { roads: [{ id: 'x', name: 'Import', points: [endPos, ll(90, 20)], profile: prof, smooth: true }] });
+ok(net, 'Übernahme');
+check(ids.length === 1 && net.corridors[ids[0]].a === net.corridors[base].b, 'übernommene Straße hängt am vorhandenen Knoten');
+
 console.log(failed ? `\n${failed} Fehler` : '\nalles ok');
 process.exit(failed ? 1 : 0);
