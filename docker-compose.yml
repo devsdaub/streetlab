@@ -1,7 +1,9 @@
 services:
   streetlab:
     build: .
-    image: streetlab:latest
+    # Lokal gebaut; mit STREETLAB_IMAGE=ghcr.io/devsdaub/streetlab und
+    # `docker compose pull` stattdessen das Image aus der GitHub-Action
+    image: ${STREETLAB_IMAGE:-streetlab}:${STREETLAB_TAG:-latest}
     container_name: streetlab
     ports:
       - "8080:80"

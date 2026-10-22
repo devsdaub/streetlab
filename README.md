@@ -19,6 +19,13 @@ docker compose up -d --build   # http://localhost:8080
 docker compose down
 ```
 
+Jeder Push auf `main` baut per GitHub Action ([docker-publish.yml](.github/workflows/docker-publish.yml)) das Image `ghcr.io/devsdaub/streetlab` (Tags `latest` und Commit-Hash). Statt lokal zu bauen:
+
+```
+STREETLAB_IMAGE=ghcr.io/devsdaub/streetlab docker compose pull
+STREETLAB_IMAGE=ghcr.io/devsdaub/streetlab docker compose up -d
+```
+
 Tests mit Edge (Dev-Server auf Port 5180 starten: `npx vite --port 5180`):
 
 ```
