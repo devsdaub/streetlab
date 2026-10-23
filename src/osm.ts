@@ -6,6 +6,7 @@
 import { localProjection, type Vec } from './geometry';
 import { defaultJunction, makeStrip, reverseProfile, uid, type ArmRole, type Crossing, type JunctionSettings, type LngLat, type Road, type Strip, type Turn } from './model';
 import { nodeKey } from './render';
+import { mergeDualCarriageways } from './osmdual';
 
 /** west, süd, ost, nord */
 export type BBox = [number, number, number, number];
@@ -531,6 +532,10 @@ export function osmToRoads(data: OsmData, area: BBox | LngLat[]): OsmImport {
     p.profile = s === 1 ? prof : prof.reverse();
   });
 
+  // ---- Richtungsfahrbahnen (zwei parallele Einbahnstraßen) zu einer Straße mit Mittelstreifen ----
+  // vor dem Angleichen und Verbinden, damit auch die zusammengeführten Straßen davon profitieren
+  pieces = mergeDualCarriageways(pieces, at, center);
+
   // ---- kurze Stücke derselben Straße an die Nachbarn angleichen ----
   // OSM-Wege derselben Straße sind oft stückweise unterschiedlich erfasst (Gehweg hier ja, dort
   // nicht; Breite mal gesetzt, mal nicht). Ein kurzes Stück mit eigenem Querschnitt ergäbe zwei
@@ -577,7 +582,9 @@ export function osmToRoads(data: OsmData, area: BBox | LngLat[]): OsmImport {
       if (l >= 40) break;
       const [a, b] = [neighbour(pc, true), neighbour(pc, false)];
       const mine = lanesSig(pc.profile);
-      if (a && b && signature(a) === signature(b) && lanesSig(a) === mine) adopt(pc, a);
+      // zwischen zwei gleichen Nachbarn: übernehmen; unter 15 m auch bei anderer Fahrstreifenzahl
+      // (eine echte Abbiegespur ist nie so kurz — das ist Erfassungsrauschen)
+      if (a && b && signature(a) === signature(b) && (lanesSig(a) === mine || l < 15)) adopt(pc, a);
       else if (l < 25 && (a ?? b) && !(a && b) && lanesSig((a ?? b)!) === mine) adopt(pc, (a ?? b)!);
     }
   }
@@ -641,6 +648,24 @@ export function osmToRoads(data: OsmData, area: BBox | LngLat[]): OsmImport {
     p.pts = p.pts.filter((_, i) => keep[i]);
   }
   pieces = pieces.filter((p) => p.pts.length >= 2 && Math.hypot(...(proj.fwd(p.pts[0]).map((v, k) => v - proj.fwd(p.pts[p.pts.length - 1])[k]) as Vec)) > 1);
+  // kurze Stummel mit freiem Ende (Reste nach dem Zusammenführen naher Knoten) entfallen
+  for (let changed = true; changed; ) {
+    changed = false;
+    const count = uses();
+    const lenM = (pc: Piece) => {
+      const q = pc.pts.map(proj.fwd);
+      let l = 0;
+      for (let i = 1; i < q.length; i++) l += Math.hypot(q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]);
+      return l;
+    };
+    const before = pieces.length;
+    pieces = pieces.filter((pc) => {
+      const free = count.get(pc.ids[0]) === 1 || count.get(pc.ids[pc.ids.length - 1]) === 1;
+      const edge = [pc.ids[0], pc.ids[pc.ids.length - 1]].some((id) => typeof id === 'string' && id.startsWith('edge'));
+      return !(free && !edge && lenM(pc) < 6);
+    });
+    changed = pieces.length < before;
+  }
 
   const roads: Road[] = pieces.map((p) => {
     const t = p.tags;

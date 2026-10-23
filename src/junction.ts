@@ -376,7 +376,7 @@ export function buildJunction(
       const [p, q] = [pts[i], pts[(i + 1) % pts.length]];
       a += p[0] * q[1] - q[0] * p[1];
     }
-    if (Math.abs(a) < 0.02) return;
+    if (Math.abs(a) < 0.004) return; // doppelte Fläche: unter 0,002 m² ist nichts zu sehen
     to.push({ type: 'Feature', properties: { node: key, color, rank, ...(kind ? { kind } : {}) }, geometry: { type: 'Polygon', coordinates: [ring(pts)] } });
   };
   const anyCw = arms.some((a) => a.hasCw);
@@ -482,13 +482,18 @@ export function buildJunction(
   }
 
   /** Form in Zufahrtsrichtung an Position s / Querversatz off setzen (x zeigt zum Knoten) */
+  let signNo = 0;
   const place = (x: Arm, s: number, off: number, shape: Shape[], to: Feature<Polygon>[], kind?: string) => {
     const { p, t } = pointAt(x.local, s);
     const n = leftNormal(t);
     const c = add(p, mul(n, off));
+    const from = to.length;
     for (const sh of shape) {
       push(to, sh.pts.map(([u, v]) => add(add(c, mul(t, -u)), mul(n, -v))), sh.color, sh.rank ?? 0, kind);
     }
+    // Teile eines Schilds gehören zusammen (die Darstellung entfernt ein Schild nur ganz)
+    if (kind === 'sign') for (const f of to.slice(from)) f.properties!.sid = `${key}#${signNo}`;
+    if (kind === 'sign') signNo++;
   };
 
   /** Querversatz für Schilder und Ampeln: auf dem Gehweg bzw. Grünstreifen rechts der Zufahrt */

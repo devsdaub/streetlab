@@ -145,6 +145,30 @@ export function checkQuality(p, built, strict = false) {
   const degree = new Map();
   for (const s of segments) for (const k of [s.start, s.end]) degree.set(k, (degree.get(k) ?? 0) + 1);
   const isJunction = (k) => !k.startsWith('end:') && !k.startsWith('sec:') && (degree.get(k) ?? 0) >= 3;
+  // offenes Straßenende dicht neben einer anderen Straße: Lücke im Netz (sollte verbunden sein)
+  {
+    const toM = (o) => { const k = Math.cos((o[1] * Math.PI) / 180); return (q) => [(q[0] - o[0]) * 111320 * k, (q[1] - o[1]) * 111320]; };
+    for (const s of segments)
+      for (const [key, q] of [[s.start, s.center[0]], [s.end, s.center[s.center.length - 1]]]) {
+        if (!key.startsWith('end:')) continue;
+        const f = toM(q);
+        for (const o of segments) {
+          if (o === s || o.road === s.road) continue;
+          const pts = o.center.map(f);
+          let d = Infinity;
+          for (let i = 1; i < pts.length; i++) {
+            const [a, b] = [pts[i - 1], pts[i]];
+            const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1;
+            const t = Math.max(0, Math.min(1, (-a[0] * dx - a[1] * dy) / l2));
+            d = Math.min(d, Math.hypot(a[0] + t * dx, a[1] + t * dy));
+          }
+          if (d < 8) {
+            errs.push(`Straßenende neben anderer Straße (${s.road.name} → ${o.road.name}, ${d.toFixed(1)} m)`);
+            break;
+          }
+        }
+      }
+  }
   // zwei Kreuzungen dicht hintereinander (versetzte Kreuzung aus zwei OSM-Knoten)
   for (const s of segments)
     if (isJunction(s.start) && isJunction(s.end) && lengthM(s.center) < 8) errs.push(`Kreuzungen zu dicht (${lengthM(s.center).toFixed(1)} m)`);

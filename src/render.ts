@@ -894,7 +894,7 @@ export class RoadRenderer {
         for (const sh of sign) {
           decor.push({
             type: 'Feature',
-            properties: { roadId: road.id, color: sh.color, rank: sh.rank ?? 6, kind: 'sign' },
+            properties: { roadId: road.id, color: sh.color, rank: sh.rank ?? 6, kind: 'sign', sid: `${road.id}:${from}` },
             geometry: { type: 'Polygon', coordinates: [sh.pts.map(([x, y]) => proj.inv([c[0] + t[0] * x + n[0] * y, c[1] + t[1] * x + n[1] * y]))] },
           });
         }
@@ -906,11 +906,61 @@ export class RoadRenderer {
     return {
       surfaces: { type: 'FeatureCollection', features: surfaces },
       markings: { type: 'FeatureCollection', features: markings },
-      decor: { type: 'FeatureCollection', features: decor },
+      decor: { type: 'FeatureCollection', features: dropSignsOnRoad(surfaces, decor) },
       junctions: junctionInfo,
       transitions,
     };
   }
+}
+
+/** befahrene Flächen — dort steht nie ein Schild */
+const DRIVEN = new Set(['drive', 'bus', 'tram', 'bike', 'parking', 'asphalt', 'furt']);
+
+/**
+ * Schlussprüfung: Schilder, die auf einer befahrenen Fläche stünden (z. B. an dicht folgenden
+ * Kreuzungen, deren Flächen sich gegenseitig nicht kennen), entfallen ganz — lieber kein Schild
+ * als eines auf der Fahrbahn. Flächen über ein Raster gesucht, damit große Netze schnell bleiben.
+ */
+function dropSignsOnRoad(surfaces: Feature[], decor: Feature[]): Feature[] {
+  const groups = new Map<string, Feature[]>();
+  for (const f of decor) {
+    const sid = f.properties?.sid as string | undefined;
+    if (sid) groups.set(sid, [...(groups.get(sid) ?? []), f]);
+  }
+  if (!groups.size) return decor;
+  const CELL = 0.0002;
+  const grid = new Map<string, Feature[]>();
+  for (const f of surfaces) {
+    if (!DRIVEN.has(f.properties?.kind ?? f.properties?.type)) continue;
+    const r = (f.geometry as Polygon).coordinates[0];
+    let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const [x, y] of r) (x0 = Math.min(x0, x)), (y0 = Math.min(y0, y)), (x1 = Math.max(x1, x)), (y1 = Math.max(y1, y));
+    for (let i = Math.floor(x0 / CELL); i <= Math.floor(x1 / CELL); i++)
+      for (let j = Math.floor(y0 / CELL); j <= Math.floor(y1 / CELL); j++) {
+        const k = `${i},${j}`;
+        const list = grid.get(k);
+        if (list) list.push(f);
+        else grid.set(k, [f]);
+      }
+  }
+  const inside = ([x, y]: number[], r: number[][]) => {
+    let c = false;
+    for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      const [xi, yi] = r[i], [xj, yj] = r[j];
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  };
+  const drop = new Set<Feature>();
+  for (const parts of groups.values()) {
+    // Mitte des Schilds: Mittel aller Teilflächen
+    let [sx, sy, n] = [0, 0, 0];
+    for (const f of parts) for (const [x, y] of (f.geometry as Polygon).coordinates[0]) (sx += x), (sy += y), n++;
+    const c = [sx / n, sy / n];
+    const cell = grid.get(`${Math.floor(c[0] / CELL)},${Math.floor(c[1] / CELL)}`) ?? [];
+    if (cell.some((f) => inside(c, (f.geometry as Polygon).coordinates[0]))) for (const f of parts) drop.add(f);
+  }
+  return drop.size ? decor.filter((f) => !drop.has(f)) : decor;
 }
 
 // ---- Netzgraph für Simulation und SUMO-Export -------------------------------

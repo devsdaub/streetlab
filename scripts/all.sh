@@ -26,5 +26,9 @@ run sim.mjs 4
 # SUMO-Prüfung nur mit Python-Umgebung (pip install eclipse-sumo): SUMO_VENV=<pfad> bash scripts/all.sh
 if [ -n "$SUMO_VENV" ]; then echo "== sumo-test.mjs"; node scripts/sumo-test.mjs "$SUMO_VENV" "$out" 2>&1 | tail -6; fi
 echo "== roundtrip.mjs"; node scripts/roundtrip.mjs fixtures/mein-stadtteil.json "$out" 2>&1 | grep -v "^ok" | tail -6
-echo "== osm-test.mjs"; NOSIM=1 node scripts/osm-test.mjs 2>&1 | grep -v notice
+# OSM-Import an drei echten Gebieten: Stuttgart Mitte, Echterdingen (Wohngebiet), Wilhelma (B10 am Neckar)
+for area in "osm-stuttgart.json 9.1650,48.7760,9.1760,48.7830" "osm-echterdingen.json 9.0090,48.6410,9.0230,48.6490" "osm-wilhelma.json 9.1990,48.8000,9.2120,48.8080"; do
+  set -- $area
+  echo "== osm-test.mjs $1"; NOSIM=1 node scripts/osm-test.mjs "scripts/fixtures/$1" "$2" 2>&1 | grep -v notice | sed -n '/Regelverstöße/,$p'
+done
 echo "== invariants.mjs"; node scripts/invariants.mjs 20 2>&1 | grep -v notice | sed -n '/Szenen ohne/,$p'
